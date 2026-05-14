@@ -1,0 +1,61 @@
+version: "3.9"
+
+services:
+  # FastAPI Application
+  api:
+    build: .
+    container_name: fastapi_cont1
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    restart: unless-stopped
+    
+  # PostgreSQL for user profiles
+  postgres:
+    image: postgres:16
+    container_name: pg_cont1
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: noornote_users
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata_noornote:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d noornote_users"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    command: >
+      bash -c "psql -U postgres -c 'CREATE DATABASE noornote_users;' 
+      || true && docker-entrypoint.sh postgres"
+
+  # MongoDB for note, activity logs
+  mongodb:
+    image: mongo:7
+    container_name: mongodb_cont1
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: mongodb
+      MONGO_INITDB_ROOT_PASSWORD: mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodata_noornote:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  pgdata_noornote:
+  mongodata_noornote:
