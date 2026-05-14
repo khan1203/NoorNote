@@ -5,3 +5,4 @@ alembic.ini
 app/__pycache__/*
 alembic/__pycache__/*
 tests/__pycache__/*
+.demo-docker.yml

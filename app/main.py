@@ -381,3 +381,22 @@ async def delete_note(note_id: str):
         )
 
     return None
+
+
+@app.post("/hybrid-endpoint")
+def hybrid_endpoint(payload: dict, db: Session = Depends(get_pg), mongodb=Depends(get_mongodb)):
+    # Example logic for hybrid endpoint
+    user_id = payload.get("user_id")
+    note_id = payload.get("note_id")
+    action = payload.get("action")
+
+    # Interact with PostgreSQL
+    user = db.query(User).filter(User.id == user_id).first()
+
+    # Interact with MongoDB
+    note = mongodb.notes.find_one({"_id": note_id})
+
+    if user and note:
+        return {"status": "success", "user_id": user_id, "note_id": note_id}
+
+    raise HTTPException(status_code=404, detail="User or Note not found")

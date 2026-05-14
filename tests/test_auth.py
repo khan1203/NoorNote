@@ -113,3 +113,34 @@ app.dependency_overrides[get_pg] = override_get_pg
 def client():
     app.mongodb = fake_mongo
     return TestClient(app)
+
+def test_signup(client):
+    payload = {
+        "username": "testuser",
+        "email": "testuser@example.com",
+        "password": "password123"
+    }
+
+    response = client.post("/auth/signup", json=payload)
+
+    assert response.status_code == 201
+
+    data = response.json()
+
+    assert data["username"] == payload["username"]
+    assert data["email"] == payload["email"]
+
+def test_login(client):
+    payload = {
+        "username": "testuser",
+        "password": "password123"
+    }
+
+    response = client.post("/auth/login", data=payload)
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert "access_token" in data
+    assert data["token_type"] == "bearer"
