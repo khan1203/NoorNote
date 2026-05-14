@@ -1,3 +1,7 @@
 .env
 alembic.ini
 .venv
+.pytest_cache
+app/__pycache__/*
+alembic/__pycache__/*
+tests/__pycache__/*
