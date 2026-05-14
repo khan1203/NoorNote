@@ -1,61 +1,89 @@
 version: "3.9"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared network so all services resolve each other by service name
+# ─────────────────────────────────────────────────────────────────────────────
+networks:
+  app_net:
+    driver: bridge
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Named volumes for data persistence across container restarts
+# ─────────────────────────────────────────────────────────────────────────────
+volumes:
+  pg_data:
+  mongo_data:
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Services
+# ─────────────────────────────────────────────────────────────────────────────
 services:
-  # FastAPI Application
-  api:
-    build: .
-    container_name: fastapi_cont1
-    ports:
-      - "8000:8000"
-    env_file:
-      - .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      mongodb:
-        condition: service_healthy
-    volumes:
-      - .:/app
-    restart: unless-stopped
-    
-  # PostgreSQL for user profiles
+
+  # ── 1. PostgreSQL ────────────────────────────────────────────────────────
   postgres:
     image: postgres:16
-    container_name: pg_cont1
+    container_name: pg_cont
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
+      POSTGRES_DB:       noornote_users
+      POSTGRES_USER:     postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: noornote_users
-    ports:
-      - "5433:5432"
     volumes:
-      - pgdata_noornote:/var/lib/postgresql/data
+      - pg_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - app_net
+    ports:
+      - "5433:5434" # HOST:CONTAINER      # expose for local inspection (optional)
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d noornote_users"]
+      test: ["CMD-SHELL", "pg_isready -U appuser -d userdb"]
       interval: 5s
       timeout: 5s
-      retries: 20
-    command: >
-      bash -c "psql -U postgres -c 'CREATE DATABASE noornote_users;' 
-      || true && docker-entrypoint.sh postgres"
+      retries: 10
+      start_period: 10s
 
-  # MongoDB for note, activity logs
-  mongodb:
+  # ── 2. MongoDB ───────────────────────────────────────────────────────────
+  mongo:
     image: mongo:7
-    container_name: mongodb_cont1
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: mongodb
-      MONGO_INITDB_ROOT_PASSWORD: mongodb
-    ports:
-      - "27017:27017"
+    container_name: mongo_cont
+    restart: unless-stopped
     volumes:
-      - mongodata_noornote:/data/db
+      - mongo_data:/data/db
+    networks:
+      - app_net
+    ports:
+      - "27017:27017"     # expose for local inspection (optional)
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
       interval: 5s
       timeout: 5s
-      retries: 20
+      retries: 10
+      start_period: 15s
 
-volumes:
-  pgdata_noornote:
-  mongodata_noornote:
+  # ── 3. FastAPI application ───────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fastapi_app
+    restart: unless-stopped
+    env_file:
+      - .env
+    # environment:
+    #   DATABASE_URL: postgresql://appuser:apppassword@postgres:5432/
+    #   MONGO_URL:    mongodb://mongo:27017
+    networks:
+      - app_net
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy   # waits until pg_isready passes
+      mongo:
+        condition: service_healthy   # waits until mongosh ping passes
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s

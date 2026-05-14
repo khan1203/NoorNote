@@ -6,6 +6,8 @@ from sqlalchemy.orm import sessionmaker
 from app.main import app
 from app.database import Base, get_pg
 from app.mongodb import get_mongodb
+from alembic.config import Config
+from alembic import command
 
 # Test PostgreSQL Database
 SQLALCHEMY_DATABASE_URL = "sqlite:///./test.db"
@@ -113,3 +115,7 @@ app.dependency_overrides[get_pg] = override_get_pg
 def client():
     app.mongodb = fake_mongo
     return TestClient(app)
+
+# Apply migrations to the SQLite test database
+alembic_cfg = Config("alembic.ini")
+command.upgrade(alembic_cfg, "head")
