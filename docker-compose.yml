@@ -1,4 +1,4 @@
-version: "3.9"
+# version: "3.9"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared network so all services resolve each other by service name
@@ -34,9 +34,9 @@ services:
     networks:
       - app_net
     ports:
-      - "5433:5434" # HOST:CONTAINER      # expose for local inspection (optional)
+      - "5433:5432" # HOST:CONTAINER      # expose for local inspection (optional)
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U appuser -d userdb"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d noornote_users"]
       interval: 5s
       timeout: 5s
       retries: 10

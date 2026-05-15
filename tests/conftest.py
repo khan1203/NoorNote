@@ -1,121 +1,166 @@
 import pytest
-from fastapi.testclient import TestClient
+import pytest_asyncio
+from httpx import AsyncClient, ASGITransport
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+from unittest.mock import AsyncMock, MagicMock, patch
+import mongomock_motor
 
-from app.main import app
-from app.database import Base, get_pg
+from app.database import get_pg, Base          # adjust import path if needed
 from app.mongodb import get_mongodb
-from alembic.config import Config
-from alembic import command
+from app.main import app
 
-# Test PostgreSQL Database
-SQLALCHEMY_DATABASE_URL = "sqlite:///./test.db"
+# ─────────────────────────────────────────────
+# PostgreSQL — in-memory SQLite for tests
+# ─────────────────────────────────────────────
+TEST_SQLITE_URL = "sqlite://"   # pure in-memory, no file
 
-engine = create_engine(
-    SQLALCHEMY_DATABASE_URL,
-    connect_args={"check_same_thread": False}
+test_engine = create_engine(
+    TEST_SQLITE_URL,
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,       # single shared connection for in-memory DB
 )
-
-TestingSessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine
-)
-
-# Create tables
-Base.metadata.create_all(bind=engine)
+TestingSession = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
 
 
-# Override PostgreSQL dependency
 def override_get_pg():
-    db = TestingSessionLocal()
+    db = TestingSession()
     try:
         yield db
     finally:
         db.close()
 
 
-# Fake MongoDB
-class FakeMongoDB:
-    def __init__(self):
-        self.notes = FakeCollection()
-        self.activity_logs = FakeCollection()
+# ─────────────────────────────────────────────
+# MongoDB — mongomock_motor (no real Mongo needed)
+# ─────────────────────────────────────────────
+mock_mongo_client = mongomock_motor.AsyncMongoMockClient()
+mock_mongo_db = mock_mongo_client["test_db"]
 
 
-class FakeCollection:
-    def __init__(self):
-        self.data = []
-
-    async def insert_one(self, document):
-        document["_id"] = str(len(self.data) + 1)
-        self.data.append(document)
-
-        class Result:
-            inserted_id = document["_id"]
-
-        return Result()
-
-    async def find_one(self, query):
-        for item in self.data:
-            if item["_id"] == query["_id"]:
-                return item
-        return None
-
-    async def delete_one(self, query):
-        deleted = 0
-
-        for item in self.data:
-            if item["_id"] == query["_id"]:
-                self.data.remove(item)
-                deleted = 1
-                break
-
-        class Result:
-            deleted_count = deleted
-
-        return Result()
-
-    async def update_one(self, query, update):
-        matched = 0
-
-        for item in self.data:
-            if item["_id"] == query["_id"]:
-                item.update(update["$set"])
-                matched = 1
-
-        class Result:
-            matched_count = matched
-
-        return Result()
-
-    def find(self, query=None):
-        return FakeCursor(self.data)
+def override_get_mongodb():
+    return mock_mongo_db
 
 
-class FakeCursor:
-    def __init__(self, data):
-        self.data = data
-
-    def sort(self, *args, **kwargs):
-        return self
-
-    def limit(self, *args, **kwargs):
-        return self
-
-    async def to_list(self, length=100):
-        return self.data[:length]
-
-
-fake_mongo = FakeMongoDB()
-
+# ─────────────────────────────────────────────
+# App-level dependency overrides
+# ─────────────────────────────────────────────
 app.dependency_overrides[get_pg] = override_get_pg
+app.dependency_overrides[get_mongodb] = override_get_mongodb
 
+
+# ─────────────────────────────────────────────
+# Session-scoped: create / drop tables once per test run
+# ─────────────────────────────────────────────
+@pytest.fixture(scope="session", autouse=True)
+def create_tables():
+    Base.metadata.create_all(bind=test_engine)
+    yield
+    Base.metadata.drop_all(bind=test_engine)
+
+
+# ─────────────────────────────────────────────
+# Function-scoped: wipe rows between tests
+# ─────────────────────────────────────────────
+@pytest.fixture(autouse=True)
+async def clean_mongo():
+    """Drop all mongo collections before each test for isolation."""
+    await mock_mongo_db.activity_logs.drop()
+    await mock_mongo_db.notes.drop()
+    yield
+
+
+@pytest.fixture(autouse=True)
+def clean_postgres():
+    """Truncate all postgres tables before each test for isolation."""
+    db = TestingSession()
+    for table in reversed(Base.metadata.sorted_tables):
+        db.execute(table.delete())
+    db.commit()
+    db.close()
+    yield
+
+
+# ─────────────────────────────────────────────
+# Async HTTP client
+# ─────────────────────────────────────────────
+@pytest_asyncio.fixture
+async def client():
+    """AsyncClient wired directly to the ASGI app — no real server needed."""
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as ac:
+        yield ac
+
+
+# ─────────────────────────────────────────────
+# Reusable user payload
+# ─────────────────────────────────────────────
 @pytest.fixture
-def client():
-    app.mongodb = fake_mongo
-    return TestClient(app)
+def user_payload() -> dict:
+    return {
+        "username": "testuser",
+        "email": "test@example.com",
+        "password": "StrongPass123!",
+    }
 
-# Apply migrations to the SQLite test database
-alembic_cfg = Config("alembic.ini")
-command.upgrade(alembic_cfg, "head")
+
+# ─────────────────────────────────────────────
+# Registered user fixture (hits /auth/signup)
+# ─────────────────────────────────────────────
+@pytest_asyncio.fixture
+async def registered_user(client: AsyncClient, user_payload: dict) -> dict:
+    """Creates a user via the API and returns the response body."""
+    resp = await client.post("/auth/signup", json=user_payload)
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+# ─────────────────────────────────────────────
+# Auth headers fixture (hits /auth/login)
+# ─────────────────────────────────────────────
+@pytest_asyncio.fixture
+async def auth_headers(
+    client: AsyncClient,
+    registered_user: dict,   # ensures user exists first
+    user_payload: dict,
+) -> dict:
+    """Returns Authorization headers with a valid Bearer token."""
+    resp = await client.post(
+        "/auth/login",
+        data={                              # OAuth2PasswordRequestForm → form data
+            "username": user_payload["username"],
+            "password": user_payload["password"],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    token = resp.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+# ─────────────────────────────────────────────
+# Reusable note payload
+# ─────────────────────────────────────────────
+@pytest.fixture
+def note_payload() -> dict:
+    return {
+        "title": "Test Note",
+        "content": "This is a test note.",
+        "tags": ["pytest", "testing"],
+    }
+
+
+# ─────────────────────────────────────────────
+# Created note fixture (hits POST /notes)
+# ─────────────────────────────────────────────
+@pytest_asyncio.fixture
+async def created_note(
+    client: AsyncClient,
+    note_payload: dict,
+) -> dict:
+    """Creates a note via the API and returns the response body."""
+    resp = await client.post("/notes", json=note_payload)
+    assert resp.status_code == 201, resp.text
+    return resp.json()

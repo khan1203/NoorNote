@@ -1,146 +1,98 @@
 import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
-from app.main import app
-from app.database import Base, get_pg
-from app.mongodb import get_mongodb
-
-# Test PostgreSQL Database
-SQLALCHEMY_DATABASE_URL = "sqlite:///./test.db"
-
-engine = create_engine(
-    SQLALCHEMY_DATABASE_URL,
-    connect_args={"check_same_thread": False}
-)
-
-TestingSessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine
-)
-
-# Create tables
-Base.metadata.create_all(bind=engine)
+from httpx import AsyncClient
 
 
-# Override PostgreSQL dependency
-def override_get_pg():
-    db = TestingSessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# ─── Signup ───────────────────────────────────────────────────────────────────
+
+async def test_signup_success(client: AsyncClient, user_payload):
+    resp = await client.post("/auth/signup", json=user_payload)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["email"] == user_payload["email"]
+    assert data["username"] == user_payload["username"]
+    assert "password" not in data
+    assert "password_hash" not in data
 
 
-# Fake MongoDB
-class FakeMongoDB:
-    def __init__(self):
-        self.notes = FakeCollection()
-        self.activity_logs = FakeCollection()
+async def test_signup_duplicate_email(client: AsyncClient, user_payload, registered_user):
+    dupe = {**user_payload, "username": "other"}
+    resp = await client.post("/auth/signup", json=dupe)
+    assert resp.status_code == 400
+    assert "email" in resp.json()["detail"].lower()
 
 
-class FakeCollection:
-    def __init__(self):
-        self.data = []
-
-    async def insert_one(self, document):
-        document["_id"] = str(len(self.data) + 1)
-        self.data.append(document)
-
-        class Result:
-            inserted_id = document["_id"]
-
-        return Result()
-
-    async def find_one(self, query):
-        for item in self.data:
-            if item["_id"] == query["_id"]:
-                return item
-        return None
-
-    async def delete_one(self, query):
-        deleted = 0
-
-        for item in self.data:
-            if item["_id"] == query["_id"]:
-                self.data.remove(item)
-                deleted = 1
-                break
-
-        class Result:
-            deleted_count = deleted
-
-        return Result()
-
-    async def update_one(self, query, update):
-        matched = 0
-
-        for item in self.data:
-            if item["_id"] == query["_id"]:
-                item.update(update["$set"])
-                matched = 1
-
-        class Result:
-            matched_count = matched
-
-        return Result()
-
-    def find(self, query=None):
-        return FakeCursor(self.data)
+async def test_signup_duplicate_username(client: AsyncClient, user_payload, registered_user):
+    dupe = {**user_payload, "email": "other@example.com"}
+    resp = await client.post("/auth/signup", json=dupe)
+    assert resp.status_code == 400
+    assert "username" in resp.json()["detail"].lower()
 
 
-class FakeCursor:
-    def __init__(self, data):
-        self.data = data
-
-    def sort(self, *args, **kwargs):
-        return self
-
-    def limit(self, *args, **kwargs):
-        return self
-
-    async def to_list(self, length=100):
-        return self.data[:length]
+async def test_signup_missing_fields(client: AsyncClient):
+    resp = await client.post("/auth/signup", json={"email": "x@x.com"})
+    assert resp.status_code == 422
 
 
-fake_mongo = FakeMongoDB()
+# ─── Login ────────────────────────────────────────────────────────────────────
 
-app.dependency_overrides[get_pg] = override_get_pg
-
-@pytest.fixture
-def client():
-    app.mongodb = fake_mongo
-    return TestClient(app)
-
-def test_signup(client):
-    payload = {
-        "username": "testuser",
-        "email": "testuser@example.com",
-        "password": "password123"
-    }
-
-    response = client.post("/auth/signup", json=payload)
-
-    assert response.status_code == 201
-
-    data = response.json()
-
-    assert data["username"] == payload["username"]
-    assert data["email"] == payload["email"]
-
-def test_login(client):
-    payload = {
-        "username": "testuser",
-        "password": "password123"
-    }
-
-    response = client.post("/auth/login", data=payload)
-
-    assert response.status_code == 200
-
-    data = response.json()
-
+async def test_login_success(client: AsyncClient, registered_user, user_payload):
+    resp = await client.post(
+        "/auth/login",
+        data={"username": user_payload["username"], "password": user_payload["password"]},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
     assert "access_token" in data
     assert data["token_type"] == "bearer"
+
+
+async def test_login_wrong_password(client: AsyncClient, registered_user, user_payload):
+    resp = await client.post(
+        "/auth/login",
+        data={"username": user_payload["username"], "password": "wrongpass"},
+    )
+    assert resp.status_code == 401
+
+
+async def test_login_nonexistent_user(client: AsyncClient):
+    resp = await client.post(
+        "/auth/login",
+        data={"username": "ghost", "password": "irrelevant"},
+    )
+    assert resp.status_code == 401
+
+
+async def test_login_logs_to_mongo(client: AsyncClient, registered_user, user_payload):
+    from conftest import mock_mongo_db
+    await client.post(
+        "/auth/login",
+        data={"username": user_payload["username"], "password": user_payload["password"]},
+    )
+    log = await mock_mongo_db.activity_logs.find_one({"action": "login"})
+    assert log is not None
+    assert log["action"] == "login"
+
+
+# ─── Profile ──────────────────────────────────────────────────────────────────
+
+async def test_get_profile_success(client: AsyncClient, auth_headers, user_payload):
+    resp = await client.get("/profile", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()["email"] == user_payload["email"]
+
+
+async def test_get_profile_no_token(client: AsyncClient):
+    resp = await client.get("/profile")
+    assert resp.status_code == 403
+
+
+async def test_get_profile_invalid_token(client: AsyncClient):
+    resp = await client.get("/profile", headers={"Authorization": "Bearer invalidtoken"})
+    assert resp.status_code == 401
+
+
+async def test_get_profile_logs_to_mongo(client: AsyncClient, auth_headers):
+    from conftest import mock_mongo_db
+    await client.get("/profile", headers=auth_headers)
+    log = await mock_mongo_db.activity_logs.find_one({"action": "profile_view"})
+    assert log is not None

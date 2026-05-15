@@ -4,9 +4,8 @@ alembic.ini
 .pytest_cache
 app/__pycache__/*
 alembic/__pycache__/*
-<<<<<<< HEAD
 tests/__pycache__/*
-=======
-tests/__pycache__/*
-.demo-docker.yml
->>>>>>> phase-1
+
+postgres
+postgres/*
+.gitignore
