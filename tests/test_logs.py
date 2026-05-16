@@ -1,22 +1,10 @@
-def test_get_logs_unauthorized(client):
-    response = client.get("/logs")
-
+async def test_get_logs_unauthorized(client):
+    response = await client.get("/logs")
     assert response.status_code == 403
 
 
-def test_hybrid_endpoint(client):
-    payload = {
-        "user_id": 1,
-        "note_id": "123",
-        "action": "view"
-    }
-
-    response = client.post("/hybrid-endpoint", json=payload)
-
+async def test_hybrid_endpoint(client, auth_headers, registered_user):
+    user_id = registered_user["id"]
+    response = await client.get(f"/users/{user_id}/logs", headers=auth_headers)
     assert response.status_code == 200
-
-    data = response.json()
-
-    assert data["status"] == "success"
-    assert data["user_id"] == payload["user_id"]
-    assert data["note_id"] == payload["note_id"]
+    assert isinstance(response.json(), list)

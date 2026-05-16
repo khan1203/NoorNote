@@ -1,6 +1,10 @@
 import pytest
 from httpx import AsyncClient
 
+async def test_login_logs_to_mongo(client, registered_user, user_payload, mongo_db):
+    ...
+    log = await mongo_db.activity_logs.find_one({"action": "login"})
+
 
 # ─── Signup ───────────────────────────────────────────────────────────────────
 
@@ -62,13 +66,12 @@ async def test_login_nonexistent_user(client: AsyncClient):
     assert resp.status_code == 401
 
 
-async def test_login_logs_to_mongo(client: AsyncClient, registered_user, user_payload):
-    from conftest import mock_mongo_db
+async def test_login_logs_to_mongo(client: AsyncClient, registered_user, user_payload, mongo_db):
     await client.post(
         "/auth/login",
         data={"username": user_payload["username"], "password": user_payload["password"]},
     )
-    log = await mock_mongo_db.activity_logs.find_one({"action": "login"})
+    log = await mongo_db.activity_logs.find_one({"action": "login"})
     assert log is not None
     assert log["action"] == "login"
 
@@ -91,8 +94,11 @@ async def test_get_profile_invalid_token(client: AsyncClient):
     assert resp.status_code == 401
 
 
-async def test_get_profile_logs_to_mongo(client: AsyncClient, auth_headers):
-    from conftest import mock_mongo_db
-    await client.get("/profile", headers=auth_headers)
-    log = await mock_mongo_db.activity_logs.find_one({"action": "profile_view"})
+async def test_get_profile_logs_to_mongo(client: AsyncClient, auth_headers, mongo_db):
+    await client.get(
+        "/profile", 
+        headers=auth_headers
+    )
+    log = await mongo_db.activity_logs.find_one({"action": "profile_view"})
     assert log is not None
+    assert log["action"] == "profile_view"
