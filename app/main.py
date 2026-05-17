@@ -1,15 +1,17 @@
 """
-NoorNote
+NoorNote main.py
 
 """
-
-from fastapi import FastAPI, Depends, HTTPException, status
+import time
+from fastapi import FastAPI, Depends, HTTPException, status, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordRequestForm
-from datetime import datetime,timedelta
+from datetime import datetime,timedelta, UTC
 from bson import ObjectId
+from typing import List, Optional
 
 from sqlalchemy.orm import Session
 from app.models import User, NoteCreate, NoteResponse, NoteUpdate
+from app.redis_client import connect_to_redis, close_redis_connection, cache_get, cache_set, cache_delete, cache_delete_pattern
 from app.database import get_pg
 from app.mongodb import connect_to_mongodb, close_mongodb_connection, get_mongodb
 from app.schemas import UserCreate, UserOut, Token, ActivityLogCreate, ActivityLogOut
@@ -20,6 +22,7 @@ from app.auth import (
     decode_access_token,
     ACCESS_TOKEN_EXPIRE_MINUTES
 )
+
 
 
 from contextlib import asynccontextmanager
@@ -42,9 +45,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title=os.getenv("APP_NAME", "FastAPI Lab 3"),
-    description="Async MongoDB Integration with FastAPI",
-    version="1.0.0",
+    title=os.getenv("APP_NAME", "NoorNote"),
+    description=os.getenv("APP_DESCRIPTION"),
+    version=os.getenv("APP_VERSION"),
     lifespan=lifespan
 )
 
@@ -146,7 +149,7 @@ async def login(
     await mongodb.activity_logs.insert_one({
         "user_id": user.id,
         "action": "login",
-        "timestamp": datetime.utcnow(),
+        "timestamp": datetime.now(UTC),
         "metadata": {}
     })
 
@@ -166,7 +169,7 @@ async def get_profile(current_user: User = Depends(get_current_user)):
     await mongodb.activity_logs.insert_one({
         "user_id": current_user.id,
         "action": "profile_view",
-        "timestamp": datetime.utcnow(),
+        "timestamp": datetime.now(UTC),
         "metadata": {}
     })
 
@@ -183,7 +186,7 @@ async def get_users(
     await mongodb.activity_logs.insert_one({
         "user_id": current_user.id,
         "action": "users_list_view",
-        "timestamp": datetime.utcnow(),
+        "timestamp": datetime.now(UTC),
         "metadata": {}
     })
 
@@ -201,7 +204,7 @@ async def create_custom_log(
     log_document = {
         "user_id": current_user.id,
         "action": log_data.action,
-        "timestamp": datetime.utcnow(),
+        "timestamp": datetime.now(UTC),
         "metadata": log_data.metadata
     }
 
@@ -283,7 +286,7 @@ async def create_note(note: NoteCreate):
 
     # Prepare note document
     note_dict = note.model_dump()
-    note_dict["created_at"] = datetime.utcnow()
+    note_dict["created_at"] = datetime.now(UTC)
 
     # Insert into MongoDB
     result = await db.notes.insert_one(note_dict)
@@ -305,15 +308,34 @@ async def get_all_notes():
 
 
 @app.get("/notes/{note_id}", response_model=NoteResponse)
-async def get_note(note_id: str):
+async def get_note(note_id: str,  x_cache_control: Optional[str] = Header(None)):
+
+    start_time = time.time()
+
+    # Check if cache should be bypassed
+    bypass_cache = (x_cache_control == "no-cache")
+
+    # Try cache first (unless bypassed)
+    if not bypass_cache:
+        cached_note = await cache_get(f"note:{note_id}")
+        if cached_note:
+            elapsed = (time.time() - start_time) * 1000
+            print(f"Cache HIT for note:{note_id} ({elapsed:.2f}ms)")
+
+            # Convert ISO string back to datetime for response
+            cached_note["created_at"] = datetime.fromisoformat(cached_note["created_at"])
+            return NoteResponse(**note_helper(cached_note))
+
+    # Cache miss - query MongoDB
+    db = get_mongodb()
+
     # Validate ObjectId format
     if not ObjectId.is_valid(note_id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid note ID format"
         )
-
-    db = get_mongodb()
+    
     note = await db.notes.find_one({"_id": ObjectId(note_id)})
 
     if not note:
@@ -321,6 +343,18 @@ async def get_note(note_id: str):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Note with id {note_id} not found"
         )
+    
+    note["_id"] = str(note["_id"])
+
+    # Prepare cache-friendly version (datetime → ISO string)
+    cache_note = note.copy()
+    cache_note["created_at"] = note["created_at"].isoformat()
+
+    # Store in cache for future requests
+    await cache_set(f"note:{note_id}", cache_note)
+
+    elapsed = (time.time() - start_time) * 1000
+    print(f"Cache MISS for note:{note_id} ({elapsed:.2f}ms)")
 
     return note_helper(note)
 
@@ -381,3 +415,31 @@ async def delete_note(note_id: str):
         )
 
     return None
+
+
+@app.get("/cache/stats")
+async def cache_stats():
+    from .redis_client import get_redis
+    redis = get_redis()
+
+    info = await redis.info("stats")
+
+    total_commands = info.get("total_commands_processed", 0)
+    keyspace_hits = info.get("keyspace_hits", 0)
+    keyspace_misses = info.get("keyspace_misses", 0)
+
+    total_requests = keyspace_hits + keyspace_misses
+    hit_rate = (keyspace_hits / total_requests * 100) if total_requests > 0 else 0
+
+    return {
+        "keyspace_hits": keyspace_hits,
+        "keyspace_misses": keyspace_misses,
+        "hit_rate_percentage": round(hit_rate, 2),
+        "total_commands": total_commands
+    }
+
+
+@app.delete("/cache/clear")
+async def clear_cache():
+    await cache_delete_pattern("note:*")
+    return {"message": "Cache cleared successfully"}

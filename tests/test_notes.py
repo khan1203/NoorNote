@@ -18,17 +18,27 @@ async def test_get_all_notes(client):
     assert isinstance(response.json(), list)
 
 
-async def test_get_single_note(client):
-    payload = {
-        "title": "Single Note",
-        "content": "Get note test",
-        "tags": []
-    }
+async def test_get_single_note(client, redis_client):
+    payload = {"title": "Single Note", "content": "Get note test", "tags": []}
     create_response = await client.post("/notes", json=payload)
     note_id = create_response.json()["id"]
+
+    # First GET — cache miss, should populate cache
     response = await client.get(f"/notes/{note_id}")
     assert response.status_code == 200
     assert response.json()["id"] == note_id
+
+    cached = await redis_client.get(f"note:{note_id}")
+    assert cached is not None  # Cache was populated
+
+    # Second GET — should hit cache
+    response2 = await client.get(f"/notes/{note_id}")
+    assert response2.status_code == 200
+    assert response2.json()["id"] == note_id
+
+    # GET with no-cache — should bypass cache
+    response3 = await client.get(f"/notes/{note_id}", headers={"X-Cache-Control": "no-cache"})
+    assert response3.status_code == 200
 
 
 async def test_update_note(client):

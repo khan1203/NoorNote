@@ -1,12 +1,19 @@
 .env
-alembic.ini
+.env.example
+
+
 .venv
 .pytest_cache
-app/__pycache__/*
-alembic/__pycache__/*
-tests/__pycache__/*
+app/__pycache__
+alembic/__pycache__
+tests/__pycache__
+
 
 postgres
 postgres/*
 .gitignore
 test.db
+
+
+app/api
+app/api/*

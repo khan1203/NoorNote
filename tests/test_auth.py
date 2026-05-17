@@ -1,10 +1,6 @@
 import pytest
 from httpx import AsyncClient
 
-async def test_login_logs_to_mongo(client, registered_user, user_payload, mongo_db):
-    ...
-    log = await mongo_db.activity_logs.find_one({"action": "login"})
-
 
 # ─── Signup ───────────────────────────────────────────────────────────────────
 

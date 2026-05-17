@@ -1,5 +1,6 @@
 import pytest
 import pytest_asyncio
+from redis import asyncio as aioredis
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -116,6 +117,29 @@ async def client():
     ) as ac:
         yield ac
 
+
+# ─────────────────────────────────────────────
+# Redis client
+# ─────────────────────────────────────────────
+from app.redis_client import connect_to_redis, close_redis_connection, redis_client as get_redis_client
+
+@pytest.fixture(autouse=True)
+async def init_redis():
+    import app.redis_client as rc
+    rc.REDIS_URL = "redis://localhost:6379/0"
+    rc.redis_client = await aioredis.from_url(
+        "redis://localhost:6379/0",
+        encoding="utf-8",
+        decode_responses=True
+    )
+    yield
+    await rc.close_redis_connection()
+
+
+@pytest.fixture
+async def redis_client():
+    from app.redis_client import get_redis
+    return get_redis()
 
 # ─────────────────────────────────────────────
 # Shared fixtures
