@@ -391,6 +391,9 @@ async def update_note(note_id: str, note_update: NoteUpdate):
             detail=f"Note with id {note_id} not found"
         )
 
+    # Invalidate cache (CRITICAL!)
+    await cache_delete(f"note:{note_id}")
+
     # Retrieve and return updated note
     updated_note = await db.notes.find_one({"_id": ObjectId(note_id)})
     return note_helper(updated_note)
@@ -413,6 +416,9 @@ async def delete_note(note_id: str):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Note with id {note_id} not found"
         )
+    
+    # Invalidate cache (CRITICAL!)
+    await cache_delete(f"note:{note_id}")
 
     return None
 
