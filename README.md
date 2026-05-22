@@ -4,7 +4,7 @@ NoorNote is a note-taking application built with FastAPI, designed for fast, sca
 
 
 
-## 01. Service Inventory
+## Section A — Service Inventory
 
 | Service | Docker Image | Port(s) | Role |
 |---      |---           |---      |---   |
@@ -20,7 +20,7 @@ NoorNote is a note-taking application built with FastAPI, designed for fast, sca
 
 
  
-## 02. Resource Estimate
+## Section B — Resource Estimate
 
 
 The table below provides a per-service breakdown of the minimum RAM and CPU required to run NoorNote locally in Docker. Figures are conservative development-environment estimates; production deployments would scale these upward.
@@ -46,7 +46,7 @@ The calculated totals of **~1,824 MB RAM** and **~2.3 vCPU** indicate that a dev
 - **vCPU:** 4 cores — ensures no single service starves under concurrent requests, and allows smooth parallel container startup.
 > **Note:** Elasticsearch is the single largest consumer at 512 MB. If resources are constrained, reducing its JVM heap to `-Xms128m -Xmx128m` can lower its footprint at the cost of indexing throughput.
 
- ## Section C — Data Model Summary
+## Section C — Data Model Summary
 
 NoorNote employs a **hybrid persistence architecture**, distributing data across three specialised stores — each chosen to match the access pattern and shape of the data it owns. PostgreSQL handles structured relational identity data, MongoDB owns the flexible document-oriented note content, and Elasticsearch maintains a derived search index projected from MongoDB. Redis and Kafka hold no durable domain data; they serve as ephemeral cache and event transport respectively.
 
@@ -105,23 +105,77 @@ MongoDB is the **system of record for note content**. Its schema-flexible docume
 
 ---
 
-### Elasticsearch — Search Index
+### Kafka — Event Payload Schema
 
-Elasticsearch holds **no source-of-truth data**. It maintains a derived, read-optimised index projected from the `notes` collection in MongoDB. Documents are synchronised asynchronously via the Kafka pipeline: FastAPI publishes a note-change event to Kafka, the Kafka Consumer processes it, and upserts the corresponding Elasticsearch document.
+Kafka holds **no persistent data** beyond its configurable retention window. However, every message published to the `note-events` topic must conform to a defined JSON schema so the Kafka Consumer can deserialise and process it deterministically before writing to MongoDB and Elasticsearch.
 
-#### Index: `notes`
+#### Topic: `note-events`
 
-| Field | ES Type | Description |
+| Field | JSON Type | Description |
 |---|---|---|
-| `note_id` | `keyword` | Stores the MongoDB `_id` as a string; used as the document `_id` in Elasticsearch for idempotent upserts. |
-| `user_id` | `integer` | Enables per-user search scoping (`term` filter on all queries). |
-| `title` | `text` | Analysed field; participates in full-text `multi_match` queries. |
-| `content` | `text` | Primary analysed field for full-text search across note bodies. |
-| `tags` | `keyword` | Exact-match filter field; not analysed. |
-| `updated_at` | `date` | Used for relevance boosting and recency-sorted result sets. |
+| `event_type` | `string` | Action that triggered the event — one of `note.created`, `note.updated`, `note.deleted`. |
+| `user_id` | `integer` | References `users.id` in PostgreSQL; identifies the actor who triggered the event. |
+| `resource_id` | `string` (ObjectId) | References the affected document in the MongoDB `notes` collection. |
+| `timestamp` | `string` (ISO 8601) | UTC timestamp of when FastAPI published the event to the topic. |
+| `metadata` | `object` | Arbitrary key-value payload carrying additional event context (e.g., `title`, `content`, `tags` at time of event). |
 
-> **Ownership note:** Elasticsearch is written to exclusively by the **Kafka Consumer**. The FastAPI layer queries Elasticsearch for search endpoints but never writes to it directly, preserving a clean unidirectional data flow.
+**Example message:**
+```json
+{
+  "event_type": "note.created",
+  "user_id": 42,
+  "resource_id": "664f1a2b3c4d5e6f7a8b9c0d",
+  "timestamp": "2025-05-22T10:34:00Z",
+  "metadata": {
+    "title": "Meeting Notes",
+    "content": "Discussed Q3 roadmap...",
+    "tags": ["work", "q3"]
+  }
+}
+```
 
+> **Ownership note:** FastAPI is the **sole producer** to this topic. The Kafka Consumer is the **sole consumer** — it reads each event, writes an `activity_log` document to MongoDB, and upserts the note into the Elasticsearch index. The `event_id` field enables the consumer to safely handle duplicate deliveries without creating duplicate log entries.
+
+---
+
+### Elasticsearch — Search Index
+ 
+Elasticsearch holds **no source-of-truth data**. It maintains a derived, read-optimised index projected from the `notes` collection in MongoDB. Documents are indexed on `POST /notes`, re-indexed on `PUT /notes/{id}`, and removed on `DELETE /notes/{id}`, keeping the index in sync with MongoDB at all times.
+ 
+#### Index: `notes`
+ 
+| Field | ES Type | Search Behaviour | Lifecycle Event |
+|---|---|---|---|
+| `note_id` | `keyword` | Used as the document `_id` for idempotent upserts; never analysed. | Set on index; unchanged on re-index. |
+| `user_id` | `integer` | `term` filter applied on every query to scope results to the requesting user. | Set on index; unchanged on re-index. |
+| `title` | `text` | Participates in `multi_match` query; **boosted 3×** over `content` for relevance scoring. Highlighting enabled. | Indexed on `POST`; re-indexed on `PUT`; document deleted on `DELETE`. |
+| `content` | `text` | Primary full-text analysed field. `fuzziness: AUTO` applied on all `GET /search` queries. Highlighting enabled. | Indexed on `POST`; re-indexed on `PUT`; document deleted on `DELETE`. |
+| `tags` | `keyword` | Exact-match `terms` filter; not analysed. | Indexed on `POST`; re-indexed on `PUT`; document deleted on `DELETE`. |
+| `created_at` | `date` | Available for range filters and recency-based result sorting. | Set once on `POST`; never mutated. |
+ 
+**Query strategy for `GET /search?q={term}`:**
+ 
+```json
+{
+  "query": {
+    "multi_match": {
+      "query": "<term>",
+      "fields": ["title^3", "content"],
+      "fuzziness": "AUTO"
+    }
+  },
+  "highlight": {
+    "fields": {
+      "title": {},
+      "content": {}
+    }
+  },
+  "sort": ["_score"]
+}
+```
+ 
+> **Ownership note:** Elasticsearch is written to exclusively by the **Kafka Consumer** — FastAPI publishes a `note-events` Kafka message on every write operation, and the consumer performs the corresponding index, re-index, or delete. The FastAPI layer only **reads** from Elasticsearch (via `GET /search`), preserving a clean unidirectional write flow.
+ 
 ---
 
 ### Redis — Ephemeral Cache
@@ -142,20 +196,19 @@ No Redis data requires migration planning or schema documentation; all keys are 
     │
     ▼
 [Nginx :80]  ──────────────────────────────────────┐
-    │                                              │
-    ▼                                              ▼
+    │                                               │
+    ▼                                               ▼
 [FastAPI :8001]                             [FastAPI :8002]
-    │                                              
-    |                                        
-    ├── READ/WRITE ──► [PostgreSQL]  (users)
-    ├── READ/WRITE ──► [MongoDB]     (notes, activity_logs)
-    ├── READ       ──► [Redis]       (note cache, sessions)
-    ├── READ       ──► [Elasticsearch] (full-text search)
+    │                                               │
+    ├── READ/WRITE ──► [PostgreSQL]    (users)
+    ├── READ/WRITE ──► [MongoDB]      (notes)
+    ├── READ       ──► [Redis]        (note cache, sessions)
+    ├── READ       ──► [Elasticsearch](full-text search)
     └── PUBLISH    ──► [Kafka :9092]
                             │
                             ▼
                    [Kafka Consumer]
                             │
-                            ├── WRITE ──► [MongoDB]       (activity_logs)
-                            └── UPSERT ─► [Elasticsearch] (notes index)
+                            ├── WRITE ──► [MongoDB]        (activity_logs)
+                            └── UPSERT ─► [Elasticsearch]  (notes index)
 ```
