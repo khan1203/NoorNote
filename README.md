@@ -2,9 +2,9 @@
 
 NoorNote is a note-taking application built with FastAPI, designed for fast, scalable, and searchable note management.
 
+---
 
-
-## Section A — Service Inventory
+# Section A — Service Inventory
 
 | Service | Docker Image | Port(s) | Role |
 |---      |---           |---      |---   |
@@ -18,9 +18,9 @@ NoorNote is a note-taking application built with FastAPI, designed for fast, sca
 | Kafka Consumer | custom build | — | Background event processor that consumes Kafka topics for async tasks. |
 
 
-
+---
  
-## Section B — Resource Estimate
+# Section B — Resource Estimate
 
 
 The table below provides a per-service breakdown of the minimum RAM and CPU required to run NoorNote locally in Docker. Figures are conservative development-environment estimates; production deployments would scale these upward.
@@ -46,17 +46,16 @@ The calculated totals of **~1,824 MB RAM** and **~2.3 vCPU** indicate that a dev
 - **vCPU:** 4 cores — ensures no single service starves under concurrent requests, and allows smooth parallel container startup.
 > **Note:** Elasticsearch is the single largest consumer at 512 MB. If resources are constrained, reducing its JVM heap to `-Xms128m -Xmx128m` can lower its footprint at the cost of indexing throughput.
 
+---
 
-
-## Section C — Data Model Summary
+# Section C — Data Model Summary
 
 NoorNote employs a **hybrid persistence architecture**, distributing data across three specialised stores — each chosen to match the access pattern and shape of the data it owns. PostgreSQL handles structured relational identity data, MongoDB owns the flexible document-oriented note content, and Elasticsearch maintains a derived search index projected from MongoDB. Redis and Kafka hold no durable domain data; they serve as ephemeral cache and event transport respectively.
 
 The table below identifies every collection and table planned for the initial release, the owning service, and the key fields that define its schema.
 
----
 
-### PostgreSQL — Relational Store
+### 01. PostgreSQL — Relational Store
 
 PostgreSQL is the **system of record for user identity**. Its strict schema, ACID guarantees, and unique-constraint enforcement make it the appropriate choice for authentication and account management, where data integrity is non-negotiable.
 
@@ -73,9 +72,9 @@ PostgreSQL is the **system of record for user identity**. Its strict schema, ACI
 
 > **Ownership note:** No other service writes to the `users` table. Downstream services (e.g., the Kafka Consumer and FastAPI instances) reference the `id` field as a logical foreign key within their own stores, but they never perform direct writes to PostgreSQL.
 
----
 
-### MongoDB — Document Store
+
+### 02. MongoDB — Document Store
 
 MongoDB is the **system of record for note content**. Its schema-flexible document model accommodates the variable structure of user notes — rich text, tags, nested metadata, and revision history — without requiring costly migrations as the schema evolves.
 
@@ -105,9 +104,9 @@ MongoDB is the **system of record for note content**. Its schema-flexible docume
 
 > **Ownership note:** Activity log documents are written by the **Kafka Consumer** service after it processes events published to the Kafka topic. The FastAPI application layer writes directly to the `notes` collection.
 
----
 
-### Kafka — Event Payload Schema
+
+### 03. Kafka — Event Payload Schema
 
 Kafka holds **no persistent data** beyond its configurable retention window. However, every message published to the `note-events` topic must conform to a defined JSON schema so the Kafka Consumer can deserialise and process it deterministically before writing to MongoDB and Elasticsearch.
 
@@ -140,7 +139,7 @@ Kafka holds **no persistent data** beyond its configurable retention window. How
 
 ---
 
-### Elasticsearch — Search Index
+### 04. Elasticsearch — Search Index
  
 Elasticsearch holds **no source-of-truth data**. It maintains a derived, read-optimised index projected from the `notes` collection in MongoDB. Documents are indexed on `POST /notes`, re-indexed on `PUT /notes/{id}`, and removed on `DELETE /notes/{id}`, keeping the index in sync with MongoDB at all times.
  
@@ -178,9 +177,9 @@ Elasticsearch holds **no source-of-truth data**. It maintains a derived, read-op
  
 > **Ownership note:** Elasticsearch is written to exclusively by the **Kafka Consumer** — FastAPI publishes a `note-events` Kafka message on every write operation, and the consumer performs the corresponding index, re-index, or delete. The FastAPI layer only **reads** from Elasticsearch (via `GET /search`), preserving a clean unidirectional write flow.
  
----
 
-### Redis — Ephemeral Cache
+
+### 05. Redis — Ephemeral Cache
 
 Redis stores **no domain model data**. It serves as a short-lived cache layer with two responsibilities:
 
@@ -189,7 +188,7 @@ Redis stores **no domain model data**. It serves as a short-lived cache layer wi
 
 No Redis data requires migration planning or schema documentation; all keys are considered disposable and are reconstructible from PostgreSQL or MongoDB.
 
----
+
 
 ### Architecture Data-Flow Summary
 
@@ -215,13 +214,13 @@ No Redis data requires migration planning or schema documentation; all keys are 
                             └── UPSERT ─► [Elasticsearch]  (notes index)
 ```
 
+---
 
-
-## Section D — Endpoint Inventory
+# Section D — Endpoint Inventory
  
 NoorNote's REST API is delivered across four incremental phases. Each phase introduces new services and capabilities while preserving full backward compatibility with endpoints defined in prior phases. Endpoints marked **Protected** require a valid JWT Bearer token in the `Authorization` header.
  
----
+
  
 ### Phase 1 — Foundation: Auth, Users, and Notes
  
@@ -240,7 +239,7 @@ NoorNote's REST API is delivered across four incremental phases. Each phase intr
 | `DELETE` | `/notes/{id}` | Protected | Delete a note document from MongoDB. Enforces ownership — only the note's author may delete. |
 | `GET` | `/users/{user_id}/notes` | Protected | Hybrid endpoint: verify the target user exists in PostgreSQL, then fetch and return all their notes from MongoDB. |
  
----
+
  
 ### Phase 2 — Search and Caching
  
@@ -257,7 +256,7 @@ NoorNote's REST API is delivered across four incremental phases. Each phase intr
 | `GET` | `/notes/{id}` *(extended)* | Protected | Check Redis first (key `note:{id}`). On **cache miss**: query MongoDB, write result to Redis with `TTL = 3600 s`, return note. On **cache hit**: return immediately with response header `Cache: HIT`. |
 | `GET` | `/search?q={term}` | Protected | Execute a `multi_match` Elasticsearch query across `title` (boosted **3×**) and `content` with `fuzziness: AUTO`. Return results sorted by `_score` with highlighted snippets. |
  
----
+
  
 ### Phase 3 — Event Streaming with Kafka
  
@@ -292,7 +291,7 @@ NoorNote's REST API is delivered across four incremental phases. Each phase intr
  
 **Consumer:** A standalone process in `consumer/consumer.py` subscribes to `noornote_events` and writes each consumed event as a document to the MongoDB `activity_logs` collection.
  
----
+
  
 ### Phase 4 — GraphQL Interface
  
@@ -327,14 +326,13 @@ NoorNote's REST API is delivered across four incremental phases. Each phase intr
 ---
 
 
-
-## Section E — Architecture Decision Log (ADL)
+# Section E — Architecture Decision Log (ADL)
 
 An Architecture Decision Log records the key technical choices made during the design of NoorNote. Each entry follows the structure: **Context** (the situation that forced a choice), **Decision** (what was chosen), and **Rationale** (why this option was selected over the alternatives and what trade-offs were accepted). Entries are immutable — if a decision is reversed, a new ADR is added rather than editing the original.
 
----
+>ADR-001
 <details>
-<summary><strong>ADR-001 — Use PostgreSQL for user identity and MongoDB for note content</strong></summary>
+<summary><strong>Use PostgreSQL for user identity and MongoDB for note content</strong></summary>
 
 <br>
 
@@ -348,10 +346,10 @@ An Architecture Decision Log records the key technical choices made during the d
 
 </details>
 
----
+>ADR-002
 
 <details>
-<summary><strong>ADR-002 — Use JWT Bearer tokens for stateless authentication</strong></summary>
+<summary><strong>Use JWT Bearer tokens for stateless authentication</strong></summary>
 
 <br>
 
@@ -365,10 +363,10 @@ An Architecture Decision Log records the key technical choices made during the d
 
 </details>
 
----
+> ADR-003
 
 <details>
-<summary><strong>ADR-003 — Use Elasticsearch as a derived search index, not the source of truth</strong></summary>
+<summary><strong>Use Elasticsearch as a derived search index, not the source of truth</strong></summary>
 
 <br>
 
@@ -382,10 +380,9 @@ An Architecture Decision Log records the key technical choices made during the d
 
 </details>
 
----
-
+>ADR-004
 <details>
-<summary><strong>ADR-004 — Decouple activity logging via Kafka (fire-and-forget)</strong></summary>
+<summary><strong>Decouple activity logging via Kafka (fire-and-forget)</strong></summary>
 
 <br>
 
@@ -399,10 +396,10 @@ An Architecture Decision Log records the key technical choices made during the d
 
 </details>
 
----
+>ADR-005
 
 <details>
-<summary><strong>ADR-005 — Use Redis as a cache-aside layer for note reads</strong></summary>
+<summary><strong>Use Redis as a cache-aside layer for note reads</strong></summary>
 
 <br>
 
@@ -416,10 +413,10 @@ An Architecture Decision Log records the key technical choices made during the d
 
 </details>
 
----
+>ADR-006
 
 <details>
-<summary><strong>ADR-006 — Use KRaft mode for Kafka — no ZooKeeper</strong></summary>
+<summary><strong>Use KRaft mode for Kafka — no ZooKeeper</strong></summary>
 
 <br>
 
@@ -433,10 +430,10 @@ An Architecture Decision Log records the key technical choices made during the d
 
 </details>
 
----
+>ADR-007
 
 <details>
-<summary><strong>ADR-007 — Mount GraphQL as an additional interface on the existing FastAPI instance</strong></summary>
+<summary><strong>Mount GraphQL as an additional interface on the existing FastAPI instance</strong></summary>
 
 <br>
 
@@ -450,10 +447,10 @@ An Architecture Decision Log records the key technical choices made during the d
 
 </details>
 
----
+>ADR-008
 
 <details>
-<summary><strong>ADR-008 — Run the Kafka Consumer as a standalone process instead of a FastAPI background task</strong></summary>
+<summary><strong>Run the Kafka Consumer as a standalone process instead of a FastAPI background task</strong></summary>
 
 <br>
 
