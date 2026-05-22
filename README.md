@@ -224,7 +224,7 @@ NoorNote's REST API is delivered across four incremental phases. Each phase intr
  
 ### Phase 1 — Foundation: Auth, Users, and Notes
  
-**Services:** PostgreSQL · MongoDB · FastAPI
+**Services:** PostgreSQL · MongoDB · FastAPI <br>
 **Goal:** A working authenticated API backed by two databases.
  
 | Method | Path | Protection | Purpose |
@@ -243,7 +243,7 @@ NoorNote's REST API is delivered across four incremental phases. Each phase intr
  
 ### Phase 2 — Search and Caching
  
-**Services added:** Elasticsearch · Redis
+**Services added:** Elasticsearch · Redis  <br>
 **Goal:** Sub-10 ms full-text search and cached hot note reads.
  
 > Phase 2 extends three existing endpoints in-place and introduces one new endpoint. No Phase 1 contracts are broken.
@@ -260,7 +260,7 @@ NoorNote's REST API is delivered across four incremental phases. Each phase intr
  
 ### Phase 3 — Event Streaming with Kafka
  
-**Services added:** Kafka (KRaft) · Kafka Consumer
+**Services added:** Kafka (KRaft) · Kafka Consumer  <br>
 **Goal:** Decouple activity logging entirely from the synchronous request path.
  
 > Phase 3 adds non-blocking Kafka publish calls to existing write endpoints and introduces one new read endpoint. All existing response contracts remain unchanged.
@@ -295,7 +295,7 @@ NoorNote's REST API is delivered across four incremental phases. Each phase intr
  
 ### Phase 4 — GraphQL Interface
  
-**Services:** No new services — mounts onto the existing FastAPI instance at `/graphql`.
+**Services:** No new services — mounts onto the existing FastAPI instance at `/graphql`.  <br>
 **Goal:** Expose the full NoorNote data graph through a single unified GraphQL endpoint, mirroring and extending all Phase 1–3 capabilities.
  
 #### Types
@@ -328,11 +328,17 @@ NoorNote's REST API is delivered across four incremental phases. Each phase intr
 
 # Section E — Architecture Decision Log (ADL)
 
-An Architecture Decision Log records the key technical choices made during the design of NoorNote. Each entry follows the structure: **Context** (the situation that forced a choice), **Decision** (what was chosen), and **Rationale** (why this option was selected over the alternatives and what trade-offs were accepted). Entries are immutable — if a decision is reversed, a new ADR is added rather than editing the original.
+An Architecture Decision Log records the key technical choices made during the design of NoorNote. Each entry follows the structure:  <br>
+**context → decision → rationale** <br> <br>
+**Context** (the situation that forced a choice),  <br>
+**Decision** (what was chosen), and  <br>
+**Rationale** (why this option was selected over the alternatives and what trade-offs were accepted).  <br>
+<br>
+Entries are immutable — if a decision is reversed, a new ADR is added rather than editing the original.
 
->ADR-001
+
 <details>
-<summary><strong>Use PostgreSQL for user identity and MongoDB for note content</strong></summary>
+<summary><strong>ADR: 001 — Use PostgreSQL for user identity and MongoDB for note content</strong></summary>
 
 <br>
 
@@ -346,10 +352,9 @@ An Architecture Decision Log records the key technical choices made during the d
 
 </details>
 
->ADR-002
 
 <details>
-<summary><strong>Use JWT Bearer tokens for stateless authentication</strong></summary>
+<summary><strong>ADR: 002 — Use JWT Bearer tokens for stateless authentication</strong></summary>
 
 <br>
 
@@ -363,10 +368,9 @@ An Architecture Decision Log records the key technical choices made during the d
 
 </details>
 
-> ADR-003
 
 <details>
-<summary><strong>Use Elasticsearch as a derived search index, not the source of truth</strong></summary>
+<summary><strong>ADR: 003 — Use Elasticsearch as a derived search index, not the source of truth</strong></summary>
 
 <br>
 
@@ -380,9 +384,9 @@ An Architecture Decision Log records the key technical choices made during the d
 
 </details>
 
->ADR-004
+
 <details>
-<summary><strong>Decouple activity logging via Kafka (fire-and-forget)</strong></summary>
+<summary><strong>ADR: 004 — Decouple activity logging via Kafka (fire-and-forget)</strong></summary>
 
 <br>
 
@@ -396,10 +400,10 @@ An Architecture Decision Log records the key technical choices made during the d
 
 </details>
 
->ADR-005
+
 
 <details>
-<summary><strong>Use Redis as a cache-aside layer for note reads</strong></summary>
+<summary><strong>ADR: 005 — Use Redis as a cache-aside layer for note reads</strong></summary>
 
 <br>
 
@@ -413,10 +417,9 @@ An Architecture Decision Log records the key technical choices made during the d
 
 </details>
 
->ADR-006
 
 <details>
-<summary><strong>Use KRaft mode for Kafka — no ZooKeeper</strong></summary>
+<summary><strong>ADR: 006 — Use KRaft mode for Kafka — no ZooKeeper</strong></summary>
 
 <br>
 
@@ -430,10 +433,9 @@ An Architecture Decision Log records the key technical choices made during the d
 
 </details>
 
->ADR-007
 
 <details>
-<summary><strong>Mount GraphQL as an additional interface on the existing FastAPI instance</strong></summary>
+<summary><strong>ADR: 007 — Mount GraphQL as an additional interface on the existing FastAPI instance</strong></summary>
 
 <br>
 
@@ -447,10 +449,10 @@ An Architecture Decision Log records the key technical choices made during the d
 
 </details>
 
->ADR-008
+
 
 <details>
-<summary><strong>Run the Kafka Consumer as a standalone process instead of a FastAPI background task</strong></summary>
+<summary><strong>ADR: 008 — Run the Kafka Consumer as a standalone process instead of a FastAPI background task</strong></summary>
 
 <br>
 
