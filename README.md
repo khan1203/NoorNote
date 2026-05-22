@@ -212,3 +212,110 @@ No Redis data requires migration planning or schema documentation; all keys are 
                             ├── WRITE ──► [MongoDB]        (activity_logs)
                             └── UPSERT ─► [Elasticsearch]  (notes index)
 ```
+
+## Section D — Endpoint Inventory
+ 
+NoorNote's REST API is delivered across four incremental phases. Each phase introduces new services and capabilities while preserving full backward compatibility with endpoints defined in prior phases. Endpoints marked **Protected** require a valid JWT Bearer token in the `Authorization` header.
+ 
+---
+ 
+### Phase 1 — Foundation: Auth, Users, and Notes
+ 
+**Services:** PostgreSQL · MongoDB · FastAPI
+**Goal:** A working authenticated API backed by two databases.
+ 
+| Method | Path | Protection | Purpose |
+|---|---|---|---|
+| `POST` | `/auth/signup` | Public | Accept `email`, `username`, `password`. Hash password with bcrypt and store the new user in PostgreSQL. Return `UserOut` (no password). |
+| `POST` | `/auth/login` | Public | Accept `username` and `password` via OAuth2 form data. Verify credentials against PostgreSQL. Return a signed JWT Bearer token. |
+| `GET` | `/profile` | Protected | Return the authenticated user's profile record from PostgreSQL. |
+| `POST` | `/notes` | Protected | Accept `title`, `content`, `tags`. Store a new note document in MongoDB scoped to the authenticated user's ID. Return `NoteOut`. |
+| `GET` | `/notes` | Protected | Return all note documents belonging to the authenticated user from MongoDB. |
+| `GET` | `/notes/{id}` | Protected | Return a single note by its MongoDB `ObjectId`. |
+| `PUT` | `/notes/{id}` | Protected | Update one or more note fields in MongoDB. Enforces ownership — only the note's author may update. |
+| `DELETE` | `/notes/{id}` | Protected | Delete a note document from MongoDB. Enforces ownership — only the note's author may delete. |
+| `GET` | `/users/{user_id}/notes` | Protected | Hybrid endpoint: verify the target user exists in PostgreSQL, then fetch and return all their notes from MongoDB. |
+ 
+---
+ 
+### Phase 2 — Search and Caching
+ 
+**Services added:** Elasticsearch · Redis
+**Goal:** Sub-10 ms full-text search and cached hot note reads.
+ 
+> Phase 2 extends three existing endpoints in-place and introduces one new endpoint. No Phase 1 contracts are broken.
+ 
+| Method | Path | Protection | Purpose |
+|---|---|---|---|
+| `POST` | `/notes` *(extended)* | Protected | After writing to MongoDB, index the note in Elasticsearch with fields `title`, `content`, `tags`, `created_at`. |
+| `PUT` | `/notes/{id}` *(extended)* | Protected | After updating MongoDB, re-index the document in Elasticsearch and invalidate the Redis cache key `note:{id}`. |
+| `DELETE` | `/notes/{id}` *(extended)* | Protected | After deleting from MongoDB, remove the document from the Elasticsearch index and delete the Redis cache key `note:{id}`. |
+| `GET` | `/notes/{id}` *(extended)* | Protected | Check Redis first (key `note:{id}`). On **cache miss**: query MongoDB, write result to Redis with `TTL = 3600 s`, return note. On **cache hit**: return immediately with response header `Cache: HIT`. |
+| `GET` | `/search?q={term}` | Protected | Execute a `multi_match` Elasticsearch query across `title` (boosted **3×**) and `content` with `fuzziness: AUTO`. Return results sorted by `_score` with highlighted snippets. |
+ 
+---
+ 
+### Phase 3 — Event Streaming with Kafka
+ 
+**Services added:** Kafka (KRaft) · Kafka Consumer
+**Goal:** Decouple activity logging entirely from the synchronous request path.
+ 
+> Phase 3 adds non-blocking Kafka publish calls to existing write endpoints and introduces one new read endpoint. All existing response contracts remain unchanged.
+ 
+**Producer configuration:** An `aiokafka` `AIOKafkaProducer` is initialised in the FastAPI application lifespan and publishes fire-and-forget events to the topic `noornote_events`.
+ 
+**Event payload structure** (published on every action below):
+ 
+```json
+{
+  "event_type": "<action>",
+  "user_id": "<integer>",
+  "resource_id": "<ObjectId | null>",
+  "timestamp": "<ISO 8601 UTC>",
+  "metadata": {}
+}
+```
+ 
+| Method | Path | Protection | Kafka Event Published | Purpose |
+|---|---|---|---|---|
+| `POST` | `/auth/signup` *(extended)* | Public | `user_signup` | Publish signup event after user creation in PostgreSQL. |
+| `POST` | `/auth/login` *(extended)* | Public | `user_login` | Publish login event after successful credential verification. |
+| `POST` | `/notes` *(extended)* | Protected | `note_created` | Publish note creation event after MongoDB write and Elasticsearch index. |
+| `PUT` | `/notes/{id}` *(extended)* | Protected | `note_updated` | Publish note update event after MongoDB write and Elasticsearch re-index. |
+| `DELETE` | `/notes/{id}` *(extended)* | Protected | `note_deleted` | Publish note deletion event after MongoDB delete and Elasticsearch removal. |
+| `GET` | `/search?q={term}` *(extended)* | Protected | `note_searched` | Publish search event after Elasticsearch query executes. |
+| `GET` | `/activity` | Protected | — | Return the last 20 `activity_logs` documents for the authenticated user from MongoDB, sorted by `timestamp` descending. |
+ 
+**Consumer:** A standalone process in `consumer/consumer.py` subscribes to `noornote_events` and writes each consumed event as a document to the MongoDB `activity_logs` collection.
+ 
+---
+ 
+### Phase 4 — GraphQL Interface
+ 
+**Services:** No new services — mounts onto the existing FastAPI instance at `/graphql`.
+**Goal:** Expose the full NoorNote data graph through a single unified GraphQL endpoint, mirroring and extending all Phase 1–3 capabilities.
+ 
+#### Types
+ 
+| Type | Fields | Resolver Notes |
+|---|---|---|
+| `User` | `id`, `username`, `email`, `createdAt`, `notes`, `activityLogs` | `notes` resolves to MongoDB `notes` collection; `activityLogs` resolves to MongoDB `activity_logs` collection. |
+| `Note` | `id`, `userId`, `title`, `content`, `tags`, `createdAt`, `author` | `author` resolves to the PostgreSQL `users` record via `user_id`. |
+| `ActivityLog` | `id`, `eventType`, `userId`, `resourceId`, `timestamp`, `metadata` | Reads directly from MongoDB `activity_logs` collection. |
+ 
+#### Queries
+ 
+| Query | Protection | Purpose |
+|---|---|---|
+| `me` | Protected | Return the authenticated user's profile by reading the JWT from GraphQL context. |
+| `user(id: ID!)` | Protected | Return a single user by PostgreSQL `id`. |
+| `users` | Protected | Return all registered users from PostgreSQL. |
+| `note(id: ID!)` | Protected | Return a single note by its MongoDB `ObjectId`. |
+| `notes` | Protected | Return all notes belonging to the authenticated user from MongoDB. |
+ 
+#### Mutations
+ 
+| Mutation | Signature | Protection | Purpose |
+|---|---|---|---|
+| `createNote` | `createNote(title: String!, content: String!, tags: [String!]!)` | Protected | Create a note with full Phase 2–3 side-effects: MongoDB write, Elasticsearch index, and Kafka `note_created` event publish. |
+| `updateUser` | `updateUser(id: ID!, username: String, email: String)` | Protected | Update the authenticated user's `username` or `email` in PostgreSQL. |
