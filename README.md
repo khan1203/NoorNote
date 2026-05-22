@@ -46,6 +46,8 @@ The calculated totals of **~1,824 MB RAM** and **~2.3 vCPU** indicate that a dev
 - **vCPU:** 4 cores — ensures no single service starves under concurrent requests, and allows smooth parallel container startup.
 > **Note:** Elasticsearch is the single largest consumer at 512 MB. If resources are constrained, reducing its JVM heap to `-Xms128m -Xmx128m` can lower its footprint at the cost of indexing throughput.
 
+
+
 ## Section C — Data Model Summary
 
 NoorNote employs a **hybrid persistence architecture**, distributing data across three specialised stores — each chosen to match the access pattern and shape of the data it owns. PostgreSQL handles structured relational identity data, MongoDB owns the flexible document-oriented note content, and Elasticsearch maintains a derived search index projected from MongoDB. Redis and Kafka hold no durable domain data; they serve as ephemeral cache and event transport respectively.
@@ -196,14 +198,14 @@ No Redis data requires migration planning or schema documentation; all keys are 
     │
     ▼
 [Nginx :80]  ──────────────────────────────────────┐
-    │                                               │
-    ▼                                               ▼
+    │                                              │
+    ▼                                              ▼
 [FastAPI :8001]                             [FastAPI :8002]
-    │                                               │
-    ├── READ/WRITE ──► [PostgreSQL]    (users)
-    ├── READ/WRITE ──► [MongoDB]      (notes)
-    ├── READ       ──► [Redis]        (note cache, sessions)
-    ├── READ       ──► [Elasticsearch](full-text search)
+    │                                              │
+    ├── READ/WRITE ──► [PostgreSQL]    (users)     ▼
+    ├── READ/WRITE ──► [MongoDB]       (notes)
+    ├── READ       ──► [Redis]         (note cache, sessions)
+    ├── READ       ──► [Elasticsearch] (full-text search)
     └── PUBLISH    ──► [Kafka :9092]
                             │
                             ▼
@@ -212,6 +214,8 @@ No Redis data requires migration planning or schema documentation; all keys are 
                             ├── WRITE ──► [MongoDB]        (activity_logs)
                             └── UPSERT ─► [Elasticsearch]  (notes index)
 ```
+
+
 
 ## Section D — Endpoint Inventory
  
@@ -319,3 +323,158 @@ NoorNote's REST API is delivered across four incremental phases. Each phase intr
 |---|---|---|---|
 | `createNote` | `createNote(title: String!, content: String!, tags: [String!]!)` | Protected | Create a note with full Phase 2–3 side-effects: MongoDB write, Elasticsearch index, and Kafka `note_created` event publish. |
 | `updateUser` | `updateUser(id: ID!, username: String, email: String)` | Protected | Update the authenticated user's `username` or `email` in PostgreSQL. |
+
+---
+
+
+
+## Section E — Architecture Decision Log (ADL)
+
+An Architecture Decision Log records the key technical choices made during the design of NoorNote. Each entry follows the structure: **Context** (the situation that forced a choice), **Decision** (what was chosen), and **Rationale** (why this option was selected over the alternatives and what trade-offs were accepted). Entries are immutable — if a decision is reversed, a new ADR is added rather than editing the original.
+
+---
+<details>
+<summary><strong>ADR-001 — Use PostgreSQL for user identity and MongoDB for note content</strong></summary>
+
+<br>
+
+**Status:** Accepted
+
+**Context:** NoorNote must persist two fundamentally different data shapes. User identity records are structured, fixed-schema, and demand unique-constraint enforcement and referential integrity. Note documents are schema-flexible — variable fields, nested tags, and a structure likely to evolve — making a rigid relational model a poor fit.
+
+**Decision:** PostgreSQL is the exclusive owner of all user identity and authentication data. MongoDB is the exclusive owner of all note content and activity logs.
+
+**Rationale:** A single PostgreSQL database with JSONB columns for notes would sacrifice query expressiveness and horizontal write scalability on the document side. A single MongoDB database could hold users, but enforcing unique constraints on `email` and `username` would require application-layer logic, introducing race conditions that a database-native unique index eliminates. Splitting ownership by data shape gives each store the workload it is optimised for. The accepted trade-off is that hybrid queries (e.g. `/users/{user_id}/notes`) require two sequential database calls, and referential consistency across stores must be maintained by the application rather than by foreign-key constraints.
+
+</details>
+
+---
+
+<details>
+<summary><strong>ADR-002 — Use JWT Bearer tokens for stateless authentication</strong></summary>
+
+<br>
+
+**Status:** Accepted
+
+**Context:** FastAPI runs as two parallel instances behind Nginx for load distribution. Any authentication mechanism that stores session state server-side requires either a shared session store or sticky routing — both of which add infrastructure coupling from Phase 1 onward.
+
+**Decision:** Authentication is stateless. All protected endpoints validate a signed JWT Bearer token that encodes `user_id` and `exp` (expiry). No server-side session state is written or read during request processing.
+
+**Rationale:** Server-side sessions in Redis would provide instant token revocation but couple every authenticated request to Redis availability and add a round-trip to the cache on the hot path. Opaque tokens stored in PostgreSQL are fully revocable but make the database a mandatory dependency on every request, turning it into a latency bottleneck under load. JWTs eliminate both concerns: each instance validates the token signature independently with no shared state. The accepted trade-off is that token revocation before expiry is not possible without an out-of-scope denylist, so the token lifetime must be kept short to bound exposure from a leaked token.
+
+</details>
+
+---
+
+<details>
+<summary><strong>ADR-003 — Use Elasticsearch as a derived search index, not the source of truth</strong></summary>
+
+<br>
+
+**Status:** Accepted
+
+**Context:** `GET /search` requires full-text relevance scoring, field boosting, fuzzy matching, and highlighted snippets — capabilities that neither MongoDB's `$text` operator nor PostgreSQL's `tsvector`/`tsquery` provide at the required quality. However, routing all note writes through Elasticsearch would couple write durability to its availability.
+
+**Decision:** MongoDB remains the source of truth for all note content. Elasticsearch holds a derived, read-optimised index that is populated asynchronously via the Kafka pipeline. In the event of any inconsistency, MongoDB is authoritative and the index can be fully rebuilt by replaying MongoDB documents.
+
+**Rationale:** MongoDB Atlas Search would remove Elasticsearch entirely, but it is a managed-cloud feature unavailable in a self-hosted Docker environment. PostgreSQL full-text search lacks native fuzzy matching and per-field boost weights without significant custom query logic. Elasticsearch's `multi_match` query with `fuzziness: AUTO` and `^3` title boosting satisfies all search requirements out of the box. The accepted trade-off is eventual consistency: a note may not appear in search results for a brief window after creation. Under normal conditions this lag is sub-second; under Kafka consumer backpressure it may extend to several seconds. This is acceptable for a note-taking workload where search is a convenience feature, not a hard real-time requirement.
+
+</details>
+
+---
+
+<details>
+<summary><strong>ADR-004 — Decouple activity logging via Kafka (fire-and-forget)</strong></summary>
+
+<br>
+
+**Status:** Accepted
+
+**Context:** NoorNote must record an activity log entry for every significant user action: signup, login, note CRUD, and search. If each of these writes a document to MongoDB synchronously within the request handler, the API response time becomes directly coupled to the latency of the logging write, and a slow or unavailable MongoDB logging path blocks the primary operation.
+
+**Decision:** FastAPI publishes a structured JSON event to the `collabnote_events` Kafka topic non-blocking (fire-and-forget) after the primary operation completes. A standalone Kafka Consumer process subscribes to the topic and writes each event as an `activity_log` document to MongoDB asynchronously, fully outside the request path.
+
+**Rationale:** A synchronous MongoDB write is the simplest implementation and guarantees zero log loss, but it directly adds logging latency to every API call and creates a cascading failure risk if MongoDB is under load. FastAPI's `BackgroundTasks` runs after the response is dispatched (removing latency impact) but executes in-process: a worker crash or restart loses any queued tasks. Kafka's durable message log provides at-least-once delivery guarantees — if the consumer crashes, it resumes from its last committed offset and replays unprocessed messages on restart. The accepted trade-off is that activity logs are eventually consistent: a log entry may be absent for a brief window after the corresponding action, and the system moves from a "guaranteed synchronous write" model to an "guaranteed eventual write" model.
+
+</details>
+
+---
+
+<details>
+<summary><strong>ADR-005 — Use Redis as a cache-aside layer for note reads</strong></summary>
+
+<br>
+
+**Status:** Accepted
+
+**Context:** `GET /notes/{id}` is the highest-frequency read endpoint in NoorNote. Notes are immutable between writes, meaning the same document is often fetched many times in quick succession with no change between requests. Serving every read from MongoDB introduces avoidable round-trip latency on the hot path.
+
+**Decision:** A cache-aside pattern is implemented on `GET /notes/{id}`: check Redis first under the key `note:{id}`. On a cache miss, fetch from MongoDB and write the result to Redis with `TTL = 3600 s`. On a cache hit, return immediately with the response header `Cache: HIT`. On `PUT /notes/{id}` or `DELETE /notes/{id}`, the corresponding Redis key is deleted immediately after the MongoDB write to prevent stale reads.
+
+**Rationale:** A write-through cache keeps Redis always in sync with MongoDB but requires every write path to flow through the cache layer, coupling write availability to Redis. No caching at all is operationally simpler and acceptable at low traffic, but it does not scale once note reads become the dominant workload. Cache-aside is the standard pattern for this scenario: it is read-optimised, tolerates Redis unavailability on the write path (a failed invalidation degrades gracefully to a stale TTL-bounded read rather than a write failure), and is straightforward to reason about. The accepted trade-off is a stale-read window if Redis is unavailable during a `PUT` invalidation; the 3600 s TTL bounds the maximum staleness to one hour.
+
+</details>
+
+---
+
+<details>
+<summary><strong>ADR-006 — Use KRaft mode for Kafka — no ZooKeeper</strong></summary>
+
+<br>
+
+**Status:** Accepted
+
+**Context:** Kafka traditionally requires a ZooKeeper ensemble for cluster coordination and broker metadata management. In a single-broker development environment, running ZooKeeper adds a container with its own RAM and CPU allocation purely for infrastructure bookkeeping, with no user-visible benefit.
+
+**Decision:** Kafka is run in KRaft mode (Kafka Raft Metadata mode) using `confluentinc/cp-kafka:7.6.0`. The broker manages its own metadata via an internal Raft log, removing the ZooKeeper dependency entirely and reducing the running service count by one.
+
+**Rationale:** Kafka with ZooKeeper is the established configuration for versions below 3.3, but it adds operational complexity and a dedicated container. Redis Streams is already in the stack and could serve as a lightweight event bus, but it lacks Kafka's consumer group offset management, replay-from-offset capability, and topic retention semantics. KRaft has been production-ready since Kafka 3.3 and is the default in all new Kafka deployments as of 3.7. The accepted trade-off is that single-broker KRaft provides no fault tolerance: a broker restart causes a brief unavailability window.
+
+</details>
+
+---
+
+<details>
+<summary><strong>ADR-007 — Mount GraphQL as an additional interface on the existing FastAPI instance</strong></summary>
+
+<br>
+
+**Status:** Accepted
+
+**Context:** Phase 4 introduces a GraphQL API to expose NoorNote's full data graph. The GraphQL layer needs access to JWT authentication context, PostgreSQL, MongoDB, Elasticsearch, and the Kafka producer — all of which are already initialised within the FastAPI application lifespan.
+
+**Decision:** The `/graphql` endpoint is mounted directly onto the existing FastAPI application (via Strawberry or Ariadne), sharing the application's existing dependency-injection context, database client pool, and Kafka producer.
+
+**Rationale:** Deploying GraphQL as a standalone microservice would provide a clean service boundary and independent scalability, but it would double the custom-build container count and require inter-service HTTP calls. Replacing REST with GraphQL entirely would break all Phase 1–3 REST contracts. Mounting GraphQL onto FastAPI adds zero new infrastructure, reuses existing middleware and database connections, and preserves backward compatibility. The accepted trade-off is that the FastAPI instance becomes a dual-protocol server.
+
+</details>
+
+---
+
+<details>
+<summary><strong>ADR-008 — Run the Kafka Consumer as a standalone process instead of a FastAPI background task</strong></summary>
+
+<br>
+
+**Status:** Accepted
+
+**Context:** NoorNote requires reliable asynchronous processing for activity logging and Elasticsearch indexing after Kafka events are published. A design decision was required between running the consumer logic inside FastAPI using `BackgroundTasks` or running it as an independent long-lived process.
+
+**Decision:** The Kafka Consumer runs as a dedicated standalone process (`consumer/consumer.py`) in its own container rather than as an in-process FastAPI background task.
+
+**Rationale:** FastAPI `BackgroundTasks` execute inside the API worker process and are tied to the lifecycle of that worker. If the FastAPI instance crashes, restarts, or scales down while tasks are pending, queued background work is lost permanently. In contrast, a standalone Kafka Consumer maintains its own lifecycle independent of the API servers and benefits fully from Kafka consumer-group semantics, offset tracking, and replay capability. If the consumer crashes, it resumes from the last committed offset and continues processing unhandled events after restart. Separating the consumer also prevents heavy indexing or logging workloads from competing with HTTP request handling threads and memory inside FastAPI workers. The accepted trade-off is additional operational complexity: one extra container/service must be deployed and monitored.
+
+</details>
+
+---
+
+
+## Conlusion
+
+NoorNote's architecture balances pragmatic engineering trade-offs with clear operational boundaries to deliver a resilient, scalable note-taking platform. By assigning each data shape to the storage technology that best fits its access patterns — PostgreSQL for identity, MongoDB for document content, Elasticsearch for search, Redis for ephemeral caching, and Kafka for durable eventing — the design reduces coupling and keeps the request path fast while preserving recoverability and auditability. The incremental delivery plan (Phases 1–4) enables rapid value delivery while adding complexity only when needed, and the Architecture Decision Log (ADL) records the reasoning behind each major choice so future contributors can understand the constraints and accepted trade-offs.
+
+Operationally, the system prefers eventual consistency where it reduces latency or increases resilience (search indexing, activity logging) and uses stateless authentication and cache-aside patterns to minimise dependencies on any single service during request handling. Running the Kafka Consumer as a separate process and mounting GraphQL on the existing FastAPI instance are concrete choices that balance reliability, developer productivity, and deployment complexity.
+
+Together, these decisions deliver a maintainable foundation that is easy to reason about, simple to operate at small scale, and straightforward to evolve: when any component needs to change, the ADL provides the documented context to make a safe, informed replacement or upgrade.
+
