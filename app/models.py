@@ -78,3 +78,71 @@ class NoteUpdate(BaseModel):
                 "tags": ["python", "fastapi", "mongodb"]
             }
         }
+
+'''
+
+# =========================
+# EVENT LOGS
+# Kafka-oriented system events
+# =========================
+from mongoengine import (
+    Document,
+    StringField,
+    DateTimeField,
+    DictField,
+    ReferenceField,
+    ObjectIdField
+)
+
+class EventLog(Document):
+    event_id = StringField(required=True, unique=True)
+    event_type = StringField(required=True)
+    producer = StringField(required=True)
+    user_id = ObjectIdField()
+    entity_type = StringField()
+    entity_id = ObjectIdField()
+    payload = DictField(required=True)
+    metadata = DictField()
+    status = StringField(choices=["pending", "processed", "failed"],default="pending")
+    created_at = DateTimeField(default=datetime.utcnow)
+    meta = {
+        "collection": "event_logs",
+        "indexes": [
+            "event_type",
+            "-created_at",
+            "status"
+        ]
+    }
+
+
+# =========================
+# ACTIVITY LOGS
+# Elasticsearch - searchable user activities
+# =========================
+
+class ActivityLog(Document):
+    user_id = ObjectIdField(required=True)
+    action = StringField(required=True)
+    description = StringField()
+    # ex: Created note "OS Lab"
+    target_type = StringField()
+    # ex: note
+    target_id = ObjectIdField()
+    visibility = StringField(
+        choices=["private", "workspace", "public"],
+        default="private"
+    )
+    source_event_id = StringField()
+    # link to Kafka event
+    created_at = DateTimeField(default=datetime.utcnow)
+    meta = {
+        "collection": "activity_logs",
+        "indexes": [
+            "user_id",
+            "action",
+            "-created_at"
+        ]
+    }
+
+
+'''
