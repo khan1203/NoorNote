@@ -14,6 +14,7 @@ volumes:
   pg_data:
   mongo_data:
   redis_data:
+  es_data:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Services
@@ -105,3 +106,31 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+
+   #  ── 5. Elasticsearch for search ───────────────────────────────────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.1
+    container_name: es_cont
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms256m -Xmx256m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    mem_limit: 1g
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    networks:
+      - app_net
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
