@@ -18,7 +18,7 @@ async def connect_to_elasticsearch():
     info = await es_client.info()
     print(f"Connected to Elasticsearch: {info['version']['number']}")
 
-    # Create index with mappings if it doesn't exist
+    # Create index with mappings, if it doesn't exist
     if not await es_client.indices.exists(index=ELASTICSEARCH_INDEX):
         await es_client.indices.create(
             index=ELASTICSEARCH_INDEX,
