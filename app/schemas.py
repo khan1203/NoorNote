@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 
 
@@ -77,5 +77,28 @@ class ActivityLogOut(BaseModel):
                 "action": "login",
                 "timestamp": "2024-12-17T10:30:00Z",
                 "metadata": {"ip_address": "192.168.1.1"}
+            }
+        }
+
+# Elasticsearch
+class SearchResult(BaseModel):
+    id: str
+    title: str
+    content: str
+    tags: List[str]
+    score: float
+    highlight: Optional[dict] = None
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "id": "507f1f77bcf86cd799439011",
+                "title": "FastAPI Tutorial",
+                "content": "FastAPI is a modern web framework...",
+                "tags": ["fastapi", "python"],
+                "score": 8.5,
+                "highlight": {
+                    "title": ["<em>FastAPI</em> Tutorial"]
+                }
             }
         }

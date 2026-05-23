@@ -3,18 +3,18 @@ NoorNote main.py
 
 """
 import time
-from fastapi import FastAPI, Depends, HTTPException, status, Header
+from fastapi import FastAPI, Depends, HTTPException, status, Header, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordRequestForm
 from datetime import datetime,timedelta, UTC
 from bson import ObjectId
 from typing import List, Optional
 
 from sqlalchemy.orm import Session
-from app.models import User, NoteCreate, NoteResponse, NoteUpdate
-from app.redis_client import connect_to_redis, close_redis_connection, cache_get, cache_set, cache_delete, cache_delete_pattern
 from app.database import get_pg
 from app.mongodb import connect_to_mongodb, close_mongodb_connection, get_mongodb
-from app.schemas import UserCreate, UserOut, Token, ActivityLogCreate, ActivityLogOut
+from app.schemas import UserCreate, UserOut, Token, ActivityLogCreate, ActivityLogOut, SearchResult
+from app.models import User, NoteCreate, NoteResponse, NoteUpdate
+from app.redis_client import connect_to_redis, close_redis_connection, cache_get, cache_set, cache_delete, cache_delete_pattern
 from app.auth import (
     hash_password,
     verify_password,
@@ -22,7 +22,12 @@ from app.auth import (
     decode_access_token,
     ACCESS_TOKEN_EXPIRE_MINUTES
 )
-
+from .elasticsearch import (
+    connect_to_elasticsearch, 
+    close_elasticsearch_connection, 
+    get_elasticsearch, 
+    ELASTICSEARCH_INDEX
+)
 
 
 from contextlib import asynccontextmanager
@@ -31,8 +36,8 @@ import os
 
 load_dotenv()
 
-# Create FastAPI application
 
+# Lifespan Context --------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -43,7 +48,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     await close_mongodb_connection()
 
-
+# FastAPI app ---------------------------
 app = FastAPI(
     title=os.getenv("APP_NAME", "NoorNote"),
     description=os.getenv("APP_DESCRIPTION"),
@@ -51,9 +56,12 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# PostgreSQL Dependency:
+
+
+# Heapler Functions -------------------------
 
 security = HTTPBearer()
+
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
@@ -76,7 +84,7 @@ def get_current_user(
 
     return user
 
-# MongoDB Dependency: Helper function to convert MongoDB document to response format
+
 def note_helper(note) -> dict:
     """
     Convert MongoDB document to API response format.
@@ -162,6 +170,259 @@ async def login(
     return {"access_token": access_token, "token_type": "bearer"}
 
 
+@app.get("/")
+async def root():
+    return {
+        "message": "Welcome to NoorNote",
+        "endpoints": {
+            "create_note": "POST /notes",
+            "get_all_notes": "GET /notes",
+            "get_note": "GET /notes/{id}",
+            "update_note": "PUT /notes/{id}",
+            "delete_note": "DELETE /notes/{id}"
+        }
+    }
+
+# NoorNote CRUD endpoints ----------------------------------------------------------------
+
+@app.post("/notes", response_model=NoteResponse, status_code=status.HTTP_201_CREATED)
+async def create_note(note: NoteCreate):
+    db = get_mongodb()
+    es = get_elasticsearch()
+
+    # Prepare note document
+    note_dict = note.model_dump()
+    note_dict["created_at"] = datetime.now(UTC)
+
+    # Insert into MongoDB
+    result = await db.notes.insert_one(note_dict)
+
+    # Index in Elasticsearch
+    note_id = str(result.inserted_id)
+
+    await es.index(
+        index=ELASTICSEARCH_INDEX,
+        id=note_id,
+        document={
+            "title": note.title,
+            "content": note.content,
+            "tags": note.tags,
+            "created_at": note_dict["created_at"].isoformat()
+        }
+    )
+
+    # Retrieve the created note
+    created_note = await db.notes.find_one({"_id": result.inserted_id})
+
+    return note_helper(created_note)
+
+
+@app.get("/notes", response_model=list[NoteResponse])
+async def get_all_notes():
+    db = get_mongodb()
+
+    # Find all notes, sort by creation time (newest first)
+    notes = await db.notes.find().sort("created_at", -1).to_list(length=100)
+
+    return [note_helper(note) for note in notes]
+
+
+@app.get("/notes/{note_id}", response_model=NoteResponse)
+async def get_note(note_id: str,  x_cache_control: Optional[str] = Header(None)):
+
+    start_time = time.time()
+
+    # Check if cache should be bypassed
+    bypass_cache = (x_cache_control == "no-cache")
+
+    # Try cache first (unless bypassed)
+    if not bypass_cache:
+        cached_note = await cache_get(f"note:{note_id}")
+        if cached_note:
+            elapsed = (time.time() - start_time) * 1000
+            print(f"Cache HIT for note:{note_id} ({elapsed:.2f}ms)")
+
+            # Convert ISO string back to datetime for response
+            cached_note["created_at"] = datetime.fromisoformat(cached_note["created_at"])
+            return NoteResponse(**note_helper(cached_note))
+
+    # Validate ObjectId format
+    if not ObjectId.is_valid(note_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid note ID format"
+        )
+
+    # Cache miss & validates ObjectID - query MongoDB
+    db = get_mongodb()
+    note = await db.notes.find_one({"_id": ObjectId(note_id)})
+
+    if not note:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Note with id {note_id} not found"
+        )
+    
+    note["_id"] = str(note["_id"])
+
+    # Prepare cache-friendly version (datetime → ISO string)
+    cache_note = note.copy()
+    cache_note["created_at"] = note["created_at"].isoformat()
+
+    # Store in Redis cache for future requests
+    await cache_set(f"note:{note_id}", cache_note)
+
+    elapsed = (time.time() - start_time) * 1000
+    print(f"Cache MISS for note:{note_id} ({elapsed:.2f}ms)")
+
+    return note_helper(note)
+
+
+@app.put("/notes/{note_id}", response_model=NoteResponse)
+async def update_note(note_id: str, note_update: NoteUpdate):
+
+
+    # Validate ObjectId format
+    if not ObjectId.is_valid(note_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid note ID format"
+        )
+
+    # Only include fields that were provided
+    update_data = note_update.model_dump(exclude_unset=True)
+
+    if not update_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No fields to update"
+        )
+
+    # Update the note to MongoDB
+    db = get_mongodb()
+    result = await db.notes.update_one(
+        {"_id": ObjectId(note_id)},
+        {"$set": update_data}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Note with id {note_id} not found"
+        )
+
+
+    # Invalidate Redis cache (CRITICAL!)
+    await cache_delete(f"note:{note_id}")
+
+
+    ### Re-index in Elasticsearch 
+    es = get_elasticsearch()
+    updated_note = await db.notes.find_one({"_id": ObjectId(note_id)})
+
+    # Prepare note document
+    note_dict = updated_note.model_dump()
+    note_dict["created_at"] = datetime.now(UTC)
+
+    await es.index(
+        index="notes",
+        id=note_id,
+        document={
+            "title": updated_note.title,
+            "content": updated_note.content,
+            "tags": updated_note.tags,
+            "created_at": note_dict["created_at"].isoformat()
+        }
+    )
+
+    # Return updated note
+    return note_helper(updated_note)
+
+
+@app.delete("/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_note(note_id: str):
+
+    db = get_mongodb()
+    es = get_elasticsearch()
+
+    # Validate ObjectId format
+    if not ObjectId.is_valid(note_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid note ID format"
+        )
+
+    # Delete form MongoDB
+    result = await db.notes.delete_one({"_id": ObjectId(note_id)})
+
+    if result.deleted_count == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Note with id {note_id} not found"
+        )
+    
+    # Delete from Elasticsearch Index
+    try:
+        await es.delete(index=ELASTICSEARCH_INDEX, id=note_id)
+    except Exception as e:
+        print(f"Failed to delete from Elasticsearch: {e}")
+    
+    # Invalidate Redis cache (CRITICAL!)
+    await cache_delete(f"note:{note_id}")
+
+    # Return fokka :)
+    return None
+
+
+# Elasticsearch ------------------------------------------
+@app.get("/search", response_model=List[SearchResult])
+async def search_notes(
+    q: str = Query(..., min_length=1, description="Search query"),
+    limit: int = Query(default=10, le=100)
+):
+    es = get_elasticsearch()
+
+    # Build Elasticsearch query
+    search_body = {
+        "query": {
+            "multi_match": {
+                "query": q,
+                "fields": ["title^3", "content"],
+                "fuzziness": "AUTO"
+            }
+        },
+        "highlight": {
+            "fields": {
+                "title": {},
+                "content": {"fragment_size": 150}
+            }
+        },
+        "size": limit
+    }
+
+    # Execute search
+    response = await es.search(
+        index=ELASTICSEARCH_INDEX,
+        body=search_body
+    )
+
+    # Format results
+    results = []
+    for hit in response["hits"]["hits"]:
+        result = SearchResult(
+            id=hit["_id"],
+            title=hit["_source"]["title"],
+            content=hit["_source"]["content"],
+            tags=hit["_source"]["tags"],
+            score=hit["_score"],
+            highlight=hit.get("highlight")
+        )
+        results.append(result)
+
+    return results
+
+
+# Profile ------------------------------------------------------------------------
 @app.get("/profile", response_model=UserOut)
 async def get_profile(current_user: User = Depends(get_current_user)):
     # Automatic logging: log profile view
@@ -193,7 +454,7 @@ async def get_users(
     users = db.query(User).all()
     return users
 
-
+# Logging --------------------------------------------------------------------------
 @app.post("/logs", response_model=dict, status_code=status.HTTP_201_CREATED)
 async def create_custom_log(
     log_data: ActivityLogCreate,
@@ -266,163 +527,7 @@ async def get_user_logs(
     return logs
 
 
-@app.get("/")
-async def root():
-    return {
-        "message": "Welcome to NoorNote",
-        "endpoints": {
-            "create_note": "POST /notes",
-            "get_all_notes": "GET /notes",
-            "get_note": "GET /notes/{id}",
-            "update_note": "PUT /notes/{id}",
-            "delete_note": "DELETE /notes/{id}"
-        }
-    }
-
-
-@app.post("/notes", response_model=NoteResponse, status_code=status.HTTP_201_CREATED)
-async def create_note(note: NoteCreate):
-    db = get_mongodb()
-
-    # Prepare note document
-    note_dict = note.model_dump()
-    note_dict["created_at"] = datetime.now(UTC)
-
-    # Insert into MongoDB
-    result = await db.notes.insert_one(note_dict)
-
-    # Retrieve the created note
-    created_note = await db.notes.find_one({"_id": result.inserted_id})
-
-    return note_helper(created_note)
-
-
-@app.get("/notes", response_model=list[NoteResponse])
-async def get_all_notes():
-    db = get_mongodb()
-
-    # Find all notes, sort by creation time (newest first)
-    notes = await db.notes.find().sort("created_at", -1).to_list(length=100)
-
-    return [note_helper(note) for note in notes]
-
-
-@app.get("/notes/{note_id}", response_model=NoteResponse)
-async def get_note(note_id: str,  x_cache_control: Optional[str] = Header(None)):
-
-    start_time = time.time()
-
-    # Check if cache should be bypassed
-    bypass_cache = (x_cache_control == "no-cache")
-
-    # Try cache first (unless bypassed)
-    if not bypass_cache:
-        cached_note = await cache_get(f"note:{note_id}")
-        if cached_note:
-            elapsed = (time.time() - start_time) * 1000
-            print(f"Cache HIT for note:{note_id} ({elapsed:.2f}ms)")
-
-            # Convert ISO string back to datetime for response
-            cached_note["created_at"] = datetime.fromisoformat(cached_note["created_at"])
-            return NoteResponse(**note_helper(cached_note))
-
-    # Cache miss - query MongoDB
-    db = get_mongodb()
-
-    # Validate ObjectId format
-    if not ObjectId.is_valid(note_id):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid note ID format"
-        )
-    
-    note = await db.notes.find_one({"_id": ObjectId(note_id)})
-
-    if not note:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Note with id {note_id} not found"
-        )
-    
-    note["_id"] = str(note["_id"])
-
-    # Prepare cache-friendly version (datetime → ISO string)
-    cache_note = note.copy()
-    cache_note["created_at"] = note["created_at"].isoformat()
-
-    # Store in cache for future requests
-    await cache_set(f"note:{note_id}", cache_note)
-
-    elapsed = (time.time() - start_time) * 1000
-    print(f"Cache MISS for note:{note_id} ({elapsed:.2f}ms)")
-
-    return note_helper(note)
-
-
-@app.put("/notes/{note_id}", response_model=NoteResponse)
-async def update_note(note_id: str, note_update: NoteUpdate):
-    # Validate ObjectId format
-    if not ObjectId.is_valid(note_id):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid note ID format"
-        )
-
-    db = get_mongodb()
-
-    # Only include fields that were provided
-    update_data = note_update.model_dump(exclude_unset=True)
-
-    if not update_data:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No fields to update"
-        )
-
-    # Update the note
-    result = await db.notes.update_one(
-        {"_id": ObjectId(note_id)},
-        {"$set": update_data}
-    )
-
-    if result.matched_count == 0:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Note with id {note_id} not found"
-        )
-
-    # Invalidate cache (CRITICAL!)
-    await cache_delete(f"note:{note_id}")
-
-    # Retrieve and return updated note
-    updated_note = await db.notes.find_one({"_id": ObjectId(note_id)})
-    return note_helper(updated_note)
-
-
-@app.delete("/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_note(note_id: str):
-    # Validate ObjectId format
-    if not ObjectId.is_valid(note_id):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid note ID format"
-        )
-
-    db = get_mongodb()
-    result = await db.notes.delete_one({"_id": ObjectId(note_id)})
-
-    if result.deleted_count == 0:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Note with id {note_id} not found"
-        )
-    
-    # Invalidate cache (CRITICAL!)
-    await cache_delete(f"note:{note_id}")
-
-    return None
-
-
+# Redis -------------------
 @app.get("/cache/stats")
 async def cache_stats():
     from .redis_client import get_redis
