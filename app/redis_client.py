@@ -13,14 +13,16 @@ redis_client: aioredis.Redis = None
 
 async def connect_to_redis():
     global redis_client
-    redis_client = await aioredis.from_url(
-        REDIS_URL,
-        encoding="utf-8",
-        decode_responses=True
-    )
-
-    await redis_client.ping()
-    print("Connected to Redis")
+    try:
+        redis_client = await aioredis.from_url(
+            REDIS_URL,
+            encoding="utf-8",
+            decode_responses=True
+        )
+        await redis_client.ping()
+        print("Connected to Redis")
+    except  Exception as e:
+        print(f"Redis connection FAILED: {e}")  # check this in logs
 
 
 async def close_redis_connection():

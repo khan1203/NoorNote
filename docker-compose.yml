@@ -71,17 +71,18 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    # environment:
-    #   DATABASE_URL: postgresql://appuser:apppassword@postgres:5432/
-    #   MONGO_URL:    mongodb://mongo:27017
     networks:
       - app_net
     ports:
       - "8000:8000"
     depends_on:
       postgres:
-        condition: service_healthy   # waits until pg_isready passes
+        condition: service_healthy
       mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
         condition: service_healthy   # waits until mongosh ping passes
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
@@ -94,6 +95,8 @@ services:
   redis:
     image: redis:7
     container_name: redis_cont
+    environment:
+      - .env
     ports:
       - "6379:6379"
     volumes:
@@ -112,6 +115,7 @@ services:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.1
     container_name: es_cont
     environment:
+      - .env
       - discovery.type=single-node
       - xpack.security.enabled=false
       - bootstrap.memory_lock=true

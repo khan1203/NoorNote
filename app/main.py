@@ -42,11 +42,15 @@ load_dotenv()
 async def lifespan(app: FastAPI):
     # Startup
     await connect_to_mongodb()
+    await connect_to_redis()
+    await connect_to_elasticsearch()
 
     yield
 
     # Shutdown
     await close_mongodb_connection()
+    await close_redis_connection()
+    await close_elasticsearch_connection()
 
 # FastAPI app ---------------------------
 app = FastAPI(
