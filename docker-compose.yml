@@ -63,7 +63,7 @@ services:
       start_period: 15s
 
   # ── 3. FastAPI application ───────────────────────────────────────────────
-  api:
+  fastapi:
     build:
       context: .
       dockerfile: Dockerfile
@@ -182,18 +182,20 @@ services:
   # 7. Kafka Consumer 
   #──────────────────────────────────────────────────────────────────────────
   consumer:
-    build: .
+    build:
+      context: .
+      dockerfile: consumer/Dockerfile
     container_name: consumer_cont
-    command: python -m consumer.consumer
+    command: ["python", "-m", "consumer.consumer"]
     restart: unless-stopped
     depends_on:
       mongo:
         condition: service_healthy
-      kafka:                        
-        condition: service_healthy   
+      kafka:
+        condition: service_healthy
     environment:
       MONGODB_URL: mongodb://mongo:27017
-      MONGODB_EVENTS_DB: noornote_events
+      MONGODB_DB: noornote_db
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: noornote_events
       KAFKA_CONSUMER_GROUP: noornote_event_consumers

@@ -247,6 +247,7 @@ async def create_note(note: NoteCreate, current_user: User = Depends(get_current
 
     # Prepare note document
     note_dict = note.model_dump()
+    note_dict["user_id"] = current_user.id
     note_dict["created_at"] = datetime.now(UTC)
 
     # Insert into MongoDB
@@ -308,7 +309,7 @@ async def get_my_notes(current_user: User = Depends(get_current_user)):
     
     db = get_mongodb()
 
-    notes = await db.notes.find({"user_id": str(current_user.id)}).sort("created_at", -1).to_list(length=100)
+    notes = await db.notes.find({"user_id": current_user.id}).sort("created_at", -1).to_list(length=100)
     
     return [note_helper(note) for note in notes]
 
@@ -620,7 +621,7 @@ async def create_log(log: EventLog):
         )
 
 
-@app.get("/logs", response_model=list[EventLog])
+@app.get("/activity", response_model=list[EventLog])
 async def get_my_logs(
     current_user: User = Depends(get_current_user),
     limit: int = Query(default=10, le=100)
