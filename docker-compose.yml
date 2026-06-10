@@ -17,8 +17,8 @@ volumes:
   es_data:
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Services
-# ─────────────────────────────────────────────────────────────────────────────
+### Services
+
 services:
 
   # ── 1. PostgreSQL ────────────────────────────────────────────────────────
@@ -63,7 +63,7 @@ services:
       start_period: 15s
 
   # ── 3. FastAPI application ───────────────────────────────────────────────
-  api:
+  fastapi:
     build:
       context: .
       dockerfile: Dockerfile
@@ -75,6 +75,9 @@ services:
       - app_net
     ports:
       - "8000:8000"
+    volumes:
+      - ./app:/app/app         
+    command: uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
     depends_on:
       postgres:
         condition: service_healthy
@@ -95,7 +98,7 @@ services:
   redis:
     image: redis:7
     container_name: redis_cont
-    environment:
+    env_file:
       - .env
     ports:
       - "6379:6379"
@@ -110,12 +113,13 @@ services:
       timeout: 3s
       retries: 20
 
-   #  ── 5. Elasticsearch for search ───────────────────────────────────────────────
+  #──────────────────────────────────────────────────────────────────────────
+  # 5. Elasticsearch for search
+  #──────────────────────────────────────────────────────────────────────────
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.1
     container_name: es_cont
     environment:
-      - .env
       - discovery.type=single-node
       - xpack.security.enabled=false
       - bootstrap.memory_lock=true
@@ -138,3 +142,62 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
+
+  #──────────────────────────────────────────────────────────────────────────
+  # 6. Kafka broker (KRaft mode - no Zookeeper needed!)
+  #──────────────────────────────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka_cont
+    networks:
+      - app_net
+    ports:
+      - "9092:9092"
+    environment:
+      # KRaft mode settings (Kafka without Zookeeper)
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      # Confluent-specific KRaft settings
+      CLUSTER_ID: 'o4AbQjJkQj-7ouU0TtW3GQ'
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  #──────────────────────────────────────────────────────────────────────────
+  # 7. Kafka Consumer 
+  #──────────────────────────────────────────────────────────────────────────
+  consumer:
+    build:
+      context: .
+      dockerfile: consumer/Dockerfile
+    container_name: consumer_cont
+    command: ["python", "-m", "consumer.consumer"]
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      MONGODB_URL: mongodb://mongo:27017
+      MONGODB_DB: noornote_db
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: noornote_events
+      KAFKA_CONSUMER_GROUP: noornote_event_consumers
+    networks:
+      - app_net

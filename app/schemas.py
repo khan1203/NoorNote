@@ -1,6 +1,6 @@
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List
-from datetime import datetime
+from typing import Optional, List, Dict, Any
+from datetime import datetime, timezone
 
 
 class UserCreate(BaseModel):
@@ -82,6 +82,7 @@ class ActivityLogOut(BaseModel):
 
 # Elasticsearch
 class SearchResult(BaseModel):
+
     id: str
     title: str
     content: str
@@ -102,3 +103,48 @@ class SearchResult(BaseModel):
                 }
             }
         }
+
+class EventLog(BaseModel):
+    """Schema for Kafka note-events topic"""
+
+    event_type: str = Field(
+        ...,
+        description="Event type: note.created | note.updated | note.deleted"
+    )
+
+    user_id: int = Field(
+        ...,
+        description="PostgreSQL users.id who triggered the event"
+    )
+
+    resource_id: str = Field(
+        ...,
+        description="MongoDB ObjectId of affected note"
+    )
+
+    # ✅ FIX: make timestamp optional with auto-default
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="UTC timestamp when event was created"
+    )
+
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Extra event context (title, tags, etc.)"
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "event_type": "note.created",
+                "user_id": 42,
+                "resource_id": "664f1a2b3c4d5e6f7a8b9c0d",
+                "timestamp": "2025-05-22T10:34:00Z",
+                "metadata": {
+                    "title": "Meeting Notes",
+                    "content": "Discussed Q3 roadmap...",
+                    "tags": ["work", "q3"]
+                }
+            }
+        }
+    }

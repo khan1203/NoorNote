@@ -7,23 +7,19 @@ load_dotenv()
 MONGODB_URL = os.getenv("MONGODB_URL")
 MONGODB_DB = os.getenv("MONGODB_DB")
 
-# MongoDB client (initialized at startup)
 mongodb_client: AsyncIOMotorClient = None
 mongodb_db = None
 
 
-async def connect_to_mongodb():
+async def connect_to_consumer_mongodb():
     global mongodb_client, mongodb_db
     mongodb_client = AsyncIOMotorClient(MONGODB_URL)
     mongodb_db = mongodb_client[MONGODB_DB]
-    print(f"Connected to MongoDB: {MONGODB_DB}")
 
+    await mongodb_client.admin.command('ping')
+    print(f"Consumer connected to MongoDB: {MONGODB_DB}")
 
-async def close_mongodb_connection():
-    global mongodb_client
-    if mongodb_client:
-        mongodb_client.close()
-        print("Closed MongoDB connection")
+    return mongodb_db
 
 
 def get_mongodb():
