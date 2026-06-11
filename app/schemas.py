@@ -106,7 +106,7 @@ class SearchResult(BaseModel):
 
 class EventLog(BaseModel):
     """Schema for Kafka note-events topic"""
-
+    
     event_type: str = Field(
         ...,
         description="Event type: note.created | note.updated | note.deleted"

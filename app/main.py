@@ -11,6 +11,7 @@ from typing import List, Optional
 
 from sqlalchemy.orm import Session
 from app.database import get_pg
+from app.helpers import get_current_user, note_helper, connect_with_retry
 from app.mongodb import connect_to_mongodb, close_mongodb_connection, get_mongodb
 from app.models import User, NoteCreate, NoteResponse, NoteUpdate
 from app.redis_client import connect_to_redis, close_redis_connection, cache_get, cache_set, cache_delete, cache_delete_pattern
@@ -58,11 +59,10 @@ async def lifespan(app: FastAPI):
     # Startup
     try:
         
-        await connect_to_mongodb() 
-        await connect_to_redis()   
-        await connect_to_elasticsearch()
+        await connect_with_retry(connect_to_mongodb, "MongoDB")
+        await connect_with_retry(connect_to_redis, "Redis")
+        await connect_with_retry(connect_to_elasticsearch, "Elasticsearch")
         await start_kafka_producer()
-        print("✓ All services connected")
 
     except Exception as e:
         print(f"✗ Startup failed: {type(e).__name__}: {e}")
@@ -84,62 +84,14 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-
-
-# Heapler Functions -------------------------
-
-security = HTTPBearer()
-
-
-def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: Session = Depends(get_pg)
-) -> User:
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-
-    token = credentials.credentials
-    email = decode_access_token(token)
-    if email is None:
-        raise credentials_exception
-
-    user = db.query(User).filter(User.email == email).first()
-    if user is None:
-        raise credentials_exception
-
-    return user
-
-
-def note_helper(note) -> dict:
-    """
-    Convert MongoDB document to API response format.
-
-    Converts ObjectId to string and structures data according to NoteResponse schema.
-    """
-    return {
-        "id": str(note["_id"]),
-        "title": note["title"],
-        "content": note["content"],
-        "tags": note.get("tags", []),
-        "created_at": note["created_at"]
-    }
-
-"""=========================================    ENDPOINTS   ==============================================="""
+# =====================================================
+# Root & Health Check Endpoints
+# =====================================================
 
 @app.get("/")
 async def root():
     return {
-        "message": "Welcome to NoorNote",
-        "endpoints": {
-            "create_note": "POST /notes",
-            "get_all_notes": "GET /notes",
-            "get_note": "GET /notes/{id}",
-            "update_note": "PUT /notes/{id}",
-            "delete_note": "DELETE /notes/{id}"
-        }
+        "message": "Welcome to NoorNote"
     }
 
 
@@ -150,9 +102,13 @@ def ping():
 
     return {"status": "ok", "message": "pong"}
 
+# =====================================================
+# Authentication Endpoints
+# =====================================================
 
 @app.post("/auth/signup", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 async def signup(user_data: UserCreate, db: Session = Depends(get_pg)):
+    
     existing_user = db.query(User).filter(
         (User.email == user_data.email) | (User.username == user_data.username)
     ).first()
@@ -180,7 +136,9 @@ async def signup(user_data: UserCreate, db: Session = Depends(get_pg)):
     db.commit()
     db.refresh(new_user)
 
-    # Publish to Kafka
+    #──────────────────────────────────────────────────────────────────────────
+    # 3. Publish to Kafka
+    #──────────────────────────────────────────────────────────────────────────
     event= EventLog(
         event_type="user.signup",
         user_id = new_user.id,
@@ -200,10 +158,8 @@ async def signup(user_data: UserCreate, db: Session = Depends(get_pg)):
 
 
 @app.post("/auth/login", response_model=Token)
-async def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
-    db: Session = Depends(get_pg)
-):
+async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_pg)):
+
     user = db.query(User).filter(User.username == form_data.username).first()
 
     if not user or not verify_password(form_data.password, user.password_hash):
@@ -213,7 +169,9 @@ async def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Publish to kafka
+    #──────────────────────────────────────────────────────────────────────────
+    #  Publish to Kafka
+    #──────────────────────────────────────────────────────────────────────────
     event = EventLog(
         event_type="user.login",
         user_id=user.id,
@@ -238,29 +196,31 @@ async def login(
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-# NoorNote CRUD endpoints ----------------------------------------------------------------
+# =====================================================
+# Notes CRUD Endpoints
+# =====================================================
 
 @app.post("/notes", response_model=NoteResponse, status_code=status.HTTP_201_CREATED)
 async def create_note(note: NoteCreate, current_user: User = Depends(get_current_user)):
+    
     db = get_mongodb()
     es = get_elasticsearch()
 
-    # Prepare note document
+
+    #  Prepare Note Document
+    #──────────────────────────────────────────────────────────────────────────
     note_dict = note.model_dump()
     note_dict["user_id"] = current_user.id
     note_dict["created_at"] = datetime.now(UTC)
 
-    # Insert into MongoDB
-    result = await db.notes.insert_one(note_dict)
-    '''
-    result = {
-    "matched_count": 1,
-    "modified_count": 1,
-    "upserted_id": None
-    }
-    '''
 
-    # Publish to kafka
+    #  Insert into MongoDB
+    #──────────────────────────────────────────────────────────────────────────
+    result = await db.notes.insert_one(note_dict)
+
+
+    #  Publish to kafka
+    #──────────────────────────────────────────────────────────────────────────
     note_id = str(result.inserted_id)
     event = EventLog(
         event_type="note.created",
@@ -286,7 +246,8 @@ async def create_note(note: NoteCreate, current_user: User = Depends(get_current
     )
     """
 
-    # Index in Elasticsearch
+    #  Index in ElasticSearch
+    #──────────────────────────────────────────────────────────────────────────
     await es.index(
         index=ELASTICSEARCH_INDEX,
         id=note_id,
@@ -294,11 +255,13 @@ async def create_note(note: NoteCreate, current_user: User = Depends(get_current
             "title": note.title,
             "content": note.content,
             "tags": note.tags,
-            "created_at": note_dict["created_at"].isoformat()
+            "created_at": note_dict["created_at"].isoformat(),
+            "user_id": current_user.id
         }
     )
 
     # Retrieve the created note
+    #──────────────────────────────────────────────────────────────────────────
     created_note = await db.notes.find_one({"_id": result.inserted_id})
 
     return note_helper(created_note)
@@ -309,6 +272,7 @@ async def get_my_notes(current_user: User = Depends(get_current_user)):
     
     db = get_mongodb()
 
+    # NOTE: datatype for user_id = int
     notes = await db.notes.find({"user_id": current_user.id}).sort("created_at", -1).to_list(length=100)
     
     return [note_helper(note) for note in notes]
@@ -369,6 +333,7 @@ async def get_note(note_id: str,  x_cache_control: Optional[str] = Header(None))
 async def update_note(note_id: str, note_update: NoteUpdate, current_user: User = Depends(get_current_user)):
 
     # Validate ObjectId format
+    #──────────────────────────────────────────────────────────────────────────
     if not ObjectId.is_valid(note_id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -385,6 +350,7 @@ async def update_note(note_id: str, note_update: NoteUpdate, current_user: User 
         )
 
     # Update the note to MongoDB
+    #──────────────────────────────────────────────────────────────────────────
     db = get_mongodb()
     result = await db.notes.update_one(
         {"_id": ObjectId(note_id)},
@@ -398,6 +364,7 @@ async def update_note(note_id: str, note_update: NoteUpdate, current_user: User 
         )
 
     # Publish to kafka
+    #──────────────────────────────────────────────────────────────────────────
     event = EventLog(
         event_type="note.updated",
         user_id= current_user.id,
@@ -413,24 +380,23 @@ async def update_note(note_id: str, note_update: NoteUpdate, current_user: User 
     )
 
     # Invalidate Redis cache (CRITICAL!)
+    #──────────────────────────────────────────────────────────────────────────
     await cache_delete(f"note:{note_id}")
 
 
-    # Re-index in Elasticsearch 
+    # Re-index in Elasticsearch
+    #──────────────────────────────────────────────────────────────────────────
     es = get_elasticsearch()
-    updated_note = await db.notes.find_one({"_id": ObjectId(note_id)})
-
-    note_dict = updated_note.model_dump()
-    note_dict["created_at"] = datetime.now(UTC)
+    updated_note = await db.notes.find_one({"_id": ObjectId(note_id)})          # NOTE: `updated_note` is just a python dict, not any Pydantic Model Instance
 
     await es.index(
         index="notes",
         id=note_id,
         document={
-            "title": updated_note.title,
-            "content": updated_note.content,
-            "tags": updated_note.tags,
-            "created_at": note_dict["created_at"].isoformat()
+            "title": updated_note["title"],
+            "content": updated_note["content"],
+            "tags": updated_note.get("tags", []),
+            "created_at": updated_note["created_at"]
         }
     )
 
@@ -491,7 +457,10 @@ async def delete_note(note_id: str, current_user: User = Depends(get_current_use
     return None
 
 
-# Elasticsearch ------------------------------------------
+# =====================================================
+# Search Endpoints
+# =====================================================
+
 @app.get("/search", response_model=List[SearchResult])
 async def search_notes(
     q: str = Query(..., min_length=1, description="Search query"),
@@ -512,7 +481,7 @@ async def search_notes(
                 }
             },
             "filter": [
-                {"term": {"user_id": str(current_user.id)}}
+                {"term": {"user_id": current_user.id}}
             ]
         }
     },
@@ -523,13 +492,15 @@ async def search_notes(
         }
     },
     "size": limit
-}
+    }
 
     # Execute search
     response = await es.search(
         index=ELASTICSEARCH_INDEX,
         body=search_body
     )
+    print(response)
+    # logger.debug(response)
 
     # Format results
     results = []
@@ -544,7 +515,9 @@ async def search_notes(
         )
         results.append(result)
 
-    # Publish to kafka
+    # =====================================================
+    # Publish to Kafka
+    # =====================================================
     event = EventLog(
         event_type="note.searched",
         user_id=current_user.id,
@@ -560,17 +533,30 @@ async def search_notes(
     return results
 
 
-# Profile ------------------------------------------------------------------------
+# =====================================================
+# Profile & User Endpoints
+# =====================================================
+
 @app.get("/profile", response_model=UserOut)
 async def get_profile(current_user: User = Depends(get_current_user)):
-    # Automatic logging: log profile view
-    mongodb = get_mongodb()
-    await mongodb.activity_logs.insert_one({
-        "user_id": current_user.id,
-        "action": "profile_view",
-        "timestamp": datetime.now(UTC),
-        "metadata": {}
-    })
+    
+    ''' Publish to kafka
+    ──────────────────────────────────────────────────────────────────────────'''
+    event = EventLog(
+    event_type="profile.view",
+    user_id=current_user.id,
+    resource_id=str(current_user.id), 
+    timestamp=datetime.now(UTC),
+    metadata={
+        "username": current_user.username,
+        "email": current_user.email,
+        # "metadata": current_user.metadata
+        }    
+    )
+
+    asyncio.create_task(
+        publish_log(event.model_dump(mode="json"))
+    )
 
     return current_user
 
@@ -592,7 +578,10 @@ async def get_users(
     users = db.query(User).all()
     return users
 
-# Logging --------------------------------------------------------------------------
+
+# =====================================================
+# Activity Log Endpoints
+# =====================================================
 
 @app.post("/log", status_code=202)
 async def create_log(log: EventLog):
@@ -628,11 +617,11 @@ async def get_my_logs(
 ):
     mongodb = get_mongodb()
     cursor = mongodb.activity_logs.find(
-        {"user_id": current_user.id}
+        {"user_id": current_user.id},
+        {"_id": 0}
     ).sort("timestamp", -1).limit(limit)
+    
     logs = await cursor.to_list(length=limit)
-    for log in logs:
-        log["_id"] = str(log["_id"])
     return logs
 
 
@@ -666,7 +655,10 @@ async def get_user_logs(
     return logs
 
 
-# Redis -------------------
+# =====================================================
+# Cache Management Endpoints
+# =====================================================
+
 @app.get("/cache/stats")
 async def cache_stats():
     from .redis_client import get_redis

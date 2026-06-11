@@ -23,6 +23,7 @@ async def connect_to_redis():
         print("Connected to Redis")
     except  Exception as e:
         print(f"Redis connection FAILED: {e}")  # check this in logs
+        raise # let lifespan handle it
 
 
 async def close_redis_connection():
