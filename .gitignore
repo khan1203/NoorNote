@@ -1,22 +1,36 @@
-.env
-.env.example
-
-
-.venv
-.pytest_cache
-app/__pycache__
-alembic/__pycache__
-tests/__pycache__
-
-
-postgres
-postgres/*
-.gitignore
-test.db
-
-
-app/api
-app/api/*
-
+# Byte-compiled / optimized / DLL files
 __pycache__/
+*.py[cod]
+*$py.class
 *.pyc
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# pytest
+.pytest_cache/
+
+# mypy
+.mypy_cache/
+
+# Logs
+*.log
+
+# Docker
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
