@@ -17,3 +17,6 @@ test.db
 
 app/api
 app/api/*
+
+__pycache__/
+*.pyc
