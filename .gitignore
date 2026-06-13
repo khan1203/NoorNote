@@ -37,3 +37,6 @@ Thumbs.db
 
 # github
 .gitignore
+
+# test
+test.db
