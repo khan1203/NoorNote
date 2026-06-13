@@ -8,6 +8,7 @@ load_dotenv()
 REDIS_URL = os.getenv("REDIS_URL")
 CACHE_TTL = int(os.getenv("CACHE_TTL", 3600))
 
+
 redis_client: aioredis.Redis = None
 
 

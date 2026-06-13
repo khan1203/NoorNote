@@ -685,3 +685,17 @@ async def cache_stats():
 async def clear_cache():
     await cache_delete_pattern("note:*")
     return {"message": "Cache cleared successfully"}
+
+# =======================================================
+# GRAPHQL ENDPOINT
+# =======================================================
+
+from app.graphql_schema import schema
+from strawberry.fastapi import GraphQLRouter
+
+# Create GraphQL router
+graphql_app = GraphQLRouter(schema)
+
+# Mount GraphQL endpoint
+app.include_router(graphql_app, prefix="/graphql")
+

@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
+from contextlib import contextmanager
 
 load_dotenv()
 POSTGRESQL_URL = os.getenv("POSTGRESQL_URL")
@@ -21,6 +22,7 @@ SessionLocal = sessionmaker(
     autocommit=False,
     future=True
 )
+
 
 def get_pg():
     db = SessionLocal()
