@@ -84,6 +84,12 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Middleware Integration ===========================================================
+from app.middleware import add_instance_id_header
+
+app.middleware("http")(add_instance_id_header)
+
+
 # =====================================================
 # Root & Health Check Endpoints
 # =====================================================
@@ -95,11 +101,8 @@ async def root():
     }
 
 
-@app.get("/ping")
+@app.get("/health")
 def ping():
-
-    # Publish to kafka
-
     return {"status": "ok", "message": "pong"}
 
 # =====================================================
