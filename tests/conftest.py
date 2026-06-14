@@ -53,19 +53,6 @@ app.dependency_overrides[mongo_module.get_mongodb] = override_get_mongodb
 
 
 # ─────────────────────────────────────────────
-# Patch the module-level _db so direct
-# get_mongodb() calls inside endpoints also
-# return the mock
-# ─────────────────────────────────────────────
-@pytest.fixture(scope="session", autouse=True)
-def patch_mongo():
-    original = getattr(mongo_module, "_db", None)
-    mongo_module._db = mock_mongo_db
-    yield
-    mongo_module._db = original
-
-
-# ─────────────────────────────────────────────
 # Prevent real MongoDB connect/disconnect
 # ─────────────────────────────────────────────
 @pytest.fixture(scope="session", autouse=True)
@@ -121,11 +108,10 @@ async def client():
 # ─────────────────────────────────────────────
 # Redis client
 # ─────────────────────────────────────────────
-from app.redis_client import connect_to_redis, close_redis_connection, redis_client as get_redis_client
+from app.redis_client import redis_client as rc # noqa: E402
 
 @pytest.fixture(autouse=True)
 async def init_redis():
-    import app.redis_client as rc
     rc.REDIS_URL = "redis://localhost:6379/0"
     rc.redis_client = await aioredis.from_url(
         "redis://localhost:6379/0",

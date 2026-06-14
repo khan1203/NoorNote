@@ -40,3 +40,6 @@ Thumbs.db
 
 # test
 test.db
+
+# ruff
+.ruff_cache

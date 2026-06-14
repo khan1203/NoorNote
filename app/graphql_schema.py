@@ -10,6 +10,7 @@ from app.database import get_pg
 from app.mongodb import get_mongodb
 from app.schemas import EventLog
 from app.kafka_producer import publish_log
+from app.auth import decode_access_token
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +130,6 @@ class UpdateUserInput:
 # ---------------------------------------------------------------------------
 # Query
 # ---------------------------------------------------------------------------
-from app.auth import decode_access_token
 
 @strawberry.type
 class Query:

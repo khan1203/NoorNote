@@ -4,7 +4,7 @@ NoorNote main.py
 """
 import time
 from fastapi import FastAPI, Depends, HTTPException, status, Header, Query
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordRequestForm
 from datetime import datetime,timedelta, UTC
 from bson import ObjectId
 from typing import List, Optional
@@ -19,7 +19,6 @@ from app.schemas import (
     UserCreate, 
     UserOut, 
     Token, 
-    ActivityLogCreate, 
     ActivityLogOut, 
     SearchResult, 
     EventLog
@@ -29,7 +28,6 @@ from app.auth import (
     hash_password,
     verify_password,
     create_access_token,
-    decode_access_token,
     ACCESS_TOKEN_EXPIRE_MINUTES
 )
 from .elasticsearch import (
@@ -85,7 +83,7 @@ app = FastAPI(
 )
 
 # Middleware Integration ===========================================================
-from app.middleware import add_instance_id_header
+from app.middleware import add_instance_id_header # noqa: E402
 
 app.middleware("http")(add_instance_id_header)
 
@@ -693,8 +691,8 @@ async def clear_cache():
 # GRAPHQL ENDPOINT
 # =======================================================
 
-from app.graphql_schema import schema
-from strawberry.fastapi import GraphQLRouter
+from app.graphql_schema import schema           # noqa: E402
+from strawberry.fastapi import GraphQLRouter    # noqa: E402
 
 # Create GraphQL router
 graphql_app = GraphQLRouter(schema)
