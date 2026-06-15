@@ -108,7 +108,7 @@ async def client():
 # ─────────────────────────────────────────────
 # Redis client
 # ─────────────────────────────────────────────
-from app.redis_client import redis_client as rc # noqa: E402
+import app.redis_client as rc  # noqa: E402
 
 @pytest.fixture(autouse=True)
 async def init_redis():
@@ -130,10 +130,6 @@ async def redis_client():
 # ─────────────────────────────────────────────
 # Shared fixtures
 # ─────────────────────────────────────────────
-@pytest.fixture
-def mongo_db():
-    return mock_mongo_db
-
 
 @pytest.fixture
 def user_payload() -> dict:

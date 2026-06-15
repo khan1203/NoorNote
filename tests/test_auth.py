@@ -1,3 +1,6 @@
+import asyncio
+from unittest.mock import AsyncMock
+import app.main as main_module
 from httpx import AsyncClient
 
 
@@ -61,14 +64,20 @@ async def test_login_nonexistent_user(client: AsyncClient):
     assert resp.status_code == 401
 
 
-async def test_login_logs_to_mongo(client: AsyncClient, registered_user, user_payload, mongo_db):
+async def test_login_logs_to_mongo(client: AsyncClient, registered_user, user_payload, monkeypatch):
+    mock_publish = AsyncMock()
+    monkeypatch.setattr(main_module, "publish_log", mock_publish)
+
     await client.post(
         "/auth/login",
         data={"username": user_payload["username"], "password": user_payload["password"]},
     )
-    log = await mongo_db.activity_logs.find_one({"action": "login"})
-    assert log is not None
-    assert log["action"] == "login"
+
+    await asyncio.sleep(0)  # let the fire-and-forget task run
+
+    mock_publish.assert_called_once()
+    event_data = mock_publish.call_args[0][0]
+    assert event_data["event_type"] == "user.login"
 
 
 # ─── Profile ──────────────────────────────────────────────────────────────────
@@ -89,11 +98,14 @@ async def test_get_profile_invalid_token(client: AsyncClient):
     assert resp.status_code == 401
 
 
-async def test_get_profile_logs_to_mongo(client: AsyncClient, auth_headers, mongo_db):
-    await client.get(
-        "/profile", 
-        headers=auth_headers
-    )
-    log = await mongo_db.activity_logs.find_one({"action": "profile_view"})
-    assert log is not None
-    assert log["action"] == "profile_view"
+async def test_get_profile_logs_to_mongo(client: AsyncClient, auth_headers, monkeypatch):
+    mock_publish = AsyncMock()
+    monkeypatch.setattr(main_module, "publish_log", mock_publish)
+
+    await client.get("/profile", headers=auth_headers)
+
+    await asyncio.sleep(0)
+
+    mock_publish.assert_called_once()
+    event_data = mock_publish.call_args[0][0]
+    assert event_data["event_type"] == "profile.view"
