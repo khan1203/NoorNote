@@ -45,7 +45,7 @@ jobs:
       APP_VERSION: 0.1.0
       APP_DESCRIPTION: "NoorNote Test"
       SECRET_KEY: ${{ secrets.SECRET_KEY }}
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      POSTGRESQL_URL: ${{ secrets.POSTGRESQL_URL }}
       MONGODB_URL: ${{ secrets.MONGODB_URL }}
       REDIS_URL: ${{ secrets.REDIS_URL }}
       ELASTICSEARCH_URL: ${{ secrets.ELASTICSEARCH_URL }}
