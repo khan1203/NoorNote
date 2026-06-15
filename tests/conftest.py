@@ -25,7 +25,12 @@ class MockElasticsearch:
 
 
 mock_es_client = MockElasticsearch()
-
+@pytest.fixture(scope="session", autouse=True)
+def patch_elasticsearch():
+    original = es_module.es_client
+    es_module.es_client = mock_es_client
+    yield
+    es_module.es_client = original
 
 # ─────────────────────────────────────────────
 # PostgreSQL — in-memory SQLite
@@ -146,13 +151,6 @@ async def redis_client():
 # ─────────────────────────────────────────────
 # Shared fixtures
 # ─────────────────────────────────────────────
-
-@pytest.fixture(scope="session", autouse=True)
-def patch_elasticsearch():
-    original = es_module.es_client
-    es_module.es_client = mock_es_client
-    yield
-    es_module.es_client = original
 
 @pytest.fixture
 def user_payload() -> dict:
