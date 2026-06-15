@@ -10,6 +10,22 @@ import mongomock_motor
 from app.database import get_pg, Base
 import app.mongodb as mongo_module
 from app.main import app
+import app.elasticsearch as es_module
+
+
+class MockElasticsearch:
+    async def index(self, **kwargs):
+        return {"result": "created"}
+
+    async def delete(self, **kwargs):
+        return {"result": "deleted"}
+
+    async def search(self, **kwargs):
+        return {"hits": {"hits": []}}
+
+
+mock_es_client = MockElasticsearch()
+
 
 # ─────────────────────────────────────────────
 # PostgreSQL — in-memory SQLite
@@ -130,6 +146,13 @@ async def redis_client():
 # ─────────────────────────────────────────────
 # Shared fixtures
 # ─────────────────────────────────────────────
+
+@pytest.fixture(scope="session", autouse=True)
+def patch_elasticsearch():
+    original = es_module.es_client
+    es_module.es_client = mock_es_client
+    yield
+    es_module.es_client = original
 
 @pytest.fixture
 def user_payload() -> dict:

@@ -1,5 +1,5 @@
 async def test_get_logs_unauthorized(client):
-    response = await client.get("/logs")
+    response = await client.get("/activity")
     assert response.status_code == 403
 
 
