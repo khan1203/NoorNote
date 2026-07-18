@@ -192,27 +192,8 @@ No Redis data requires migration planning or schema documentation; all keys are 
 
 ### Architecture Data-Flow Summary
 
-```
-[Client]
-    │
-    ▼
-[Nginx :80]  ──────────────────────────────────────┐
-    │                                              │
-    ▼                                              ▼
-[FastAPI :8001]                             [FastAPI :8002]
-    │                                              │
-    ├── READ/WRITE ──► [PostgreSQL]    (users)     ▼
-    ├── READ/WRITE ──► [MongoDB]       (notes)
-    ├── READ       ──► [Redis]         (note cache, sessions)
-    ├── READ       ──► [Elasticsearch] (full-text search)
-    └── PUBLISH    ──► [Kafka :9092]
-                            │
-                            ▼
-                   [Kafka Consumer]
-                            │
-                            ├── WRITE ──► [MongoDB]        (activity_logs)
-                            └── UPSERT ─► [Elasticsearch]  (notes index)
-```
+<img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/d1e2ee9d-9cfd-4ce3-b74d-51f08e1a53c8" />
+
 
 ---
 
